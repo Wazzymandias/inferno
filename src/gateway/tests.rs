@@ -1,0 +1,355 @@
+use std::time::Duration;
+
+use axum::{
+    Router,
+    body::{Body, Bytes},
+    http::{HeaderMap, Method, StatusCode, Uri, header},
+    routing::{any, get},
+};
+
+use super::routes::{app, strip_transport_headers};
+use crate::backend::Backend;
+use axum::http::HeaderValue;
+use reqwest::{Client, Url};
+
+use crate::backend::install_crypto_provider;
+use tokio::{sync::mpsc, task::JoinHandle};
+use tokio_rustls::rustls;
+
+async fn serve(router: Router) -> (String, JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (format!("http://{address}"), task)
+}
+
+async fn serve_tls(version: &'static rustls::SupportedProtocolVersion) -> (u16, JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let certificate = include_bytes!("../testdata/localhost.der").to_vec().into();
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(
+        include_bytes!("../testdata/localhost-key.der").to_vec(),
+    );
+    let config = rustls::ServerConfig::builder_with_protocol_versions(&[version])
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate], key.into())
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            // Invalid-certificate cases deliberately abort the TLS handshake.
+            let Ok(mut stream) = acceptor.accept(socket).await else {
+                continue;
+            };
+            let mut request = [0; 4096];
+            if stream.read(&mut request).await.unwrap() == 0 {
+                continue;
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+    (port, task)
+}
+
+#[tokio::test]
+async fn https_verifies_certificates_and_hostnames_with_tls12_and_tls13() {
+    // Construct the production backend first to initialize its crypto provider.
+    let backend = Backend::new(
+        Url::parse("https://localhost/v1").unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let ca = reqwest::Certificate::from_der(include_bytes!("../testdata/ca.der")).unwrap();
+    let trusted = Client::builder()
+        .tls_certs_only([ca])
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        let (port, task) = serve_tls(version).await;
+        let response = trusted
+            .get(format!("https://localhost:{port}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "ok");
+
+        let untrusted = backend
+            .client
+            .get(format!("https://localhost:{port}/v1/models"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(format!("{untrusted:?}").contains("UnknownIssuer"));
+
+        let wrong_hostname = trusted
+            .get(format!("https://127.0.0.1:{port}/v1/models"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(format!("{wrong_hostname:?}").contains("NotValidForName"));
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn preserves_backend_prefix_query_body_and_error_response() {
+    let mock = Router::new().route(
+        "/engines/v1/chat/completions",
+        any(
+            |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| async move {
+                assert_eq!(method, Method::POST);
+                assert_eq!(uri.query(), Some("trace=1"));
+                assert_eq!(headers[header::AUTHORIZATION], "Bearer test");
+                assert!(!headers.contains_key("x-hop"));
+                assert_eq!(body, r#"{"model":"test","messages":[]}"#);
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    [
+                        ("x-backend", "preserved"),
+                        ("content-type", "application/json"),
+                    ],
+                    r#"{"error":"backend validation"}"#,
+                )
+            },
+        ),
+    );
+    let (upstream, mock_task) = serve(mock).await;
+    let backend = Backend::new(
+        Url::parse(&format!("{upstream}/engines/v1")).unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let (gateway, api_task) = serve(app(backend, 1024)).await;
+    let response = Client::new()
+        .post(format!("{gateway}/v1/chat/completions?trace=1"))
+        .header(header::AUTHORIZATION, "Bearer test")
+        .header(header::CONNECTION, "x-hop")
+        .header("x-hop", "remove me")
+        .body(r#"{"model":"test","messages":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.headers()["x-backend"], "preserved");
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    assert_eq!(
+        response.text().await.unwrap(),
+        r#"{"error":"backend validation"}"#
+    );
+    api_task.abort();
+    mock_task.abort();
+}
+
+#[tokio::test]
+async fn streams_first_event_before_backend_finishes() {
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(2);
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    let body = Body::from_stream(stream);
+    let body = std::sync::Arc::new(tokio::sync::Mutex::new(Some(body)));
+    let mock = Router::new().route(
+        "/v1/chat/completions",
+        get(move || {
+            let body = std::sync::Arc::clone(&body);
+            async move {
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    body.lock().await.take().unwrap(),
+                )
+            }
+        }),
+    );
+    let (upstream, mock_task) = serve(mock).await;
+    let backend = Backend::new(
+        Url::parse(&format!("{upstream}/v1")).unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let (gateway, api_task) = serve(app(backend, 1024)).await;
+    tx.send(Ok(Bytes::from_static(b"data: first\n\n")))
+        .await
+        .unwrap();
+    let mut response = Client::new()
+        .get(format!("{gateway}/v1/chat/completions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/event-stream"
+    );
+    let first = tokio::time::timeout(Duration::from_secs(1), response.chunk())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, "data: first\n\n");
+    tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n")))
+        .await
+        .unwrap();
+    drop(tx);
+    assert_eq!(response.chunk().await.unwrap().unwrap(), "data: [DONE]\n\n");
+    assert!(response.chunk().await.unwrap().is_none());
+    api_task.abort();
+    mock_task.abort();
+}
+
+#[tokio::test]
+async fn times_out_an_unfinished_backend_stream() {
+    let mock = Router::new().route(
+        "/v1/chat/completions",
+        get(|| async {
+            let stream = futures_util::stream::unfold(true, |first| async move {
+                if first {
+                    Some((
+                        Ok::<_, std::io::Error>(Bytes::from_static(b"data: first\n\n")),
+                        false,
+                    ))
+                } else {
+                    std::future::pending().await
+                }
+            });
+            Body::from_stream(stream)
+        }),
+    );
+    let (upstream, mock_task) = serve(mock).await;
+    let backend = Backend::new(
+        Url::parse(&format!("{upstream}/v1")).unwrap(),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let (gateway, api_task) = serve(app(backend, 1024)).await;
+    let mut response = Client::new()
+        .get(format!("{gateway}/v1/chat/completions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.chunk().await.unwrap().unwrap(), "data: first\n\n");
+    let result = tokio::time::timeout(Duration::from_secs(3), response.chunk())
+        .await
+        .expect("gateway must terminate the stream when its backend timeout expires");
+    assert!(
+        result.is_err(),
+        "an incomplete stream must end with an error"
+    );
+    api_task.abort();
+    mock_task.abort();
+}
+
+#[tokio::test]
+async fn distinguishes_liveness_backend_failure_and_oversized_request() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let backend = Backend::new(
+        Url::parse(&format!("http://{address}/v1")).unwrap(),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let (gateway, task) = serve(app(backend, 4)).await;
+    let client = Client::new();
+    for (path, expected) in [
+        ("/healthz", StatusCode::OK),
+        ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
+        ("/v1/models", StatusCode::BAD_GATEWAY),
+    ] {
+        let response = client.get(format!("{gateway}{path}")).send().await.unwrap();
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::BAD_GATEWAY {
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert_eq!(
+                response.text().await.unwrap(),
+                r#"{"error":{"message":"inference backend unavailable"}}"#
+            );
+        }
+    }
+    assert_eq!(
+        client
+            .post(format!("{gateway}/v1/chat/completions"))
+            .body("too large")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+    );
+    task.abort();
+}
+
+#[test]
+fn removes_all_connection_nominated_headers() {
+    let mut headers = HeaderMap::new();
+    headers.append(header::CONNECTION, HeaderValue::from_static("x-one"));
+    headers.append(
+        header::CONNECTION,
+        HeaderValue::from_static("X-Two, keep-alive"),
+    );
+    headers.insert("x-one", HeaderValue::from_static("one"));
+    headers.insert("x-two", HeaderValue::from_static("two"));
+    strip_transport_headers(&mut headers);
+    assert!(headers.is_empty());
+}
+
+#[tokio::test]
+async fn shutdown_deadline_bounds_an_active_request() {
+    // This test starts a router directly, without Backend's TLS initialization.
+    install_crypto_provider();
+    let client = Client::new();
+    let (started_tx, mut started_rx) = mpsc::channel(1);
+    let router = Router::new().route(
+        "/hang",
+        get(move || {
+            let started_tx = started_tx.clone();
+            async move {
+                started_tx.send(()).await.unwrap();
+                std::future::pending::<StatusCode>().await
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(super::shutdown::serve(
+        listener,
+        router,
+        async {
+            let _ = stop_rx.await;
+        },
+        Duration::from_millis(50),
+    ));
+    let request =
+        tokio::spawn(async move { client.get(format!("http://{address}/hang")).send().await });
+    tokio::time::timeout(Duration::from_secs(2), started_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    stop_tx.send(()).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    request.abort();
+}
+
+#[tokio::test]
+async fn idle_server_shuts_down_cleanly() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        super::shutdown::serve(listener, Router::new(), async {}, Duration::from_secs(1)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}

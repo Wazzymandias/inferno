@@ -1,0 +1,32 @@
+services:
+  api:
+    # Rebuild changed source on plain `docker compose up`; unchanged layers stay cached.
+    pull_policy: build
+    build:
+      context: .
+      args:
+        RUST_IMAGE: ${RUST_IMAGE:-rust:1.98-bookworm}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-gcr.io/distroless/cc-debian13:nonroot}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${API_ADDRESS}:${API_HOST_PORT}:${API_PORT}"
+    environment:
+      API_ADDRESS: ${API_ADDRESS:?Set API_ADDRESS in .env}
+      API_PORT: ${API_PORT:?Set API_PORT in .env}
+      INFERENCE_ENDPOINT: ${INFERENCE_ENDPOINT:?Set INFERENCE_ENDPOINT in .env}
+      INFERENCE_TIMEOUT_SECONDS: ${INFERENCE_TIMEOUT_SECONDS:-300}
+      MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-1048576}
+      SHUTDOWN_TIMEOUT_SECONDS: ${SHUTDOWN_TIMEOUT_SECONDS:-5}
+    depends_on:
+      local-model:
+        condition: service_started
+        required: false
+
+  # Only local deployments should download and configure model weights.
+  local-model:
+    profiles: [local]
+    provider:
+      type: model
+      options:
+        model: ${INFERENCE_MODEL:-}
