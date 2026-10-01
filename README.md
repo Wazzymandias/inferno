@@ -65,9 +65,7 @@ requests; this setup's `/v1/models` response may contain an ID that vLLM rejects
 | Model logs | `docker model logs` |
 | Stop API | `docker compose down` |
 
-Docker Desktop manages the model separately and retains downloaded models.
-The example exposes the API on all interfaces. Host model memory is outside
-API container limits; see [the memory observations in SETUP.md](SETUP.md).
+
 
 **Already have a backend?** Set `COMPOSE_PROFILES=` and
 `INFERENCE_ENDPOINT=<your API base URL>` in `.env`, then run `docker compose up -d`.
