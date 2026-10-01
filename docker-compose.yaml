@@ -4,6 +4,7 @@ services:
     pull_policy: build
     build:
       context: .
+      dockerfile: services/gateway/Dockerfile
       args:
         RUST_IMAGE: ${RUST_IMAGE:-rust:1.98-bookworm}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-gcr.io/distroless/cc-debian13:nonroot}

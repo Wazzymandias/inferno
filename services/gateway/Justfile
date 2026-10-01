@@ -1,0 +1,16 @@
+# Run rustfmt and Clippy for the gateway with warnings denied.
+lint:
+    cargo +nightly fmt --package infergate
+    cargo +nightly clippy --package infergate --all-targets --locked -- -D warnings
+
+# Build the gateway binary.
+build:
+    cargo build --package infergate --bin infergate --locked
+
+# Run the gateway tests.
+test:
+    cargo nextest run --package infergate --all-targets --locked
+
+# Build the gateway image using the repository root as the build context.
+docker:
+    docker build --file Dockerfile --tag infergate:local ../..

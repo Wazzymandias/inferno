@@ -4,8 +4,9 @@ ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot
 FROM ${RUST_IMAGE} AS build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY src ./src
-RUN rustup toolchain install nightly --profile minimal && cargo build --release --locked
+COPY services/gateway/Cargo.toml ./services/gateway/Cargo.toml
+COPY services/gateway/src ./services/gateway/src
+RUN rustup toolchain install nightly --profile minimal && cargo build --package infergate --bin infergate --release --locked
 
 FROM ${RUNTIME_IMAGE}
 COPY --from=build /app/target/release/infergate /usr/local/bin/infergate
