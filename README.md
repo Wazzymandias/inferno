@@ -5,6 +5,11 @@ Infergate is a multi-model LLM gateway that runs inference on user requests for 
 
 ## Requirements
 
+### Frontend
+
+- [Bun](https://bun.sh/get)
+
+### Gateway
 - [Rust nightly](https://www.rust-lang.org/tools/install)
 - [cargo-nextest](https://nexte.st/docs/installation/)
 - [Just 1.31+](https://github.com/casey/just) 
@@ -55,7 +60,7 @@ jq -n --arg model "$INFERENCE_MODEL" \
 The default API URL is `http://localhost:8080/v1`. Use `INFERENCE_MODEL` in
 requests; this setup's `/v1/models` response may contain an ID that vLLM rejects.
 
-**Check, debug, or stop:**
+### Check, debug, or stop
 
 | Task | Command or endpoint |
 | --- | --- |
