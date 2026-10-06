@@ -42,9 +42,13 @@ docker model install-runner --backend vllm
 cp .env.example .env
 docker compose up -d
 ```
+By default, docker compose runs:
+- React frontend chat interface
+- Rust gateway with "pre-inference" based routing
+- (macOS only) vLLM serving LLama 3.2 1B
+- set `COMPOSE_PROFILES=metrics` to support telemetry using opentelemetry and SigNoz 
 
-Open the chat at `http://localhost:3000`. The `web` service and its container are
-both named `web`; the browser sends inference requests through the gateway.
+Open the chat at `http://localhost:3000`. The browser sends inference requests through the gateway.
 
 The example includes a small model. To use another, change `INFERENCE_MODEL`
 in `.env` before starting. First startup downloads the model and builds the API;
@@ -91,7 +95,7 @@ Apply changed chat settings with `docker compose up -d --no-deps web`.
 `WEB_PORT` sets the container's listener port. `BUN_IMAGE` selects the declared
 Bun build and runtime image.
 
-### SigNoz telemetry
+### Telemetry
 
 Add `metrics` to `COMPOSE_PROFILES` in your untracked `.env`: use
 `COMPOSE_PROFILES=local,metrics` with the local model, or

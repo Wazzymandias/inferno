@@ -88,3 +88,38 @@ curl --no-buffer http://localhost:8080/v1/responses \
 
 Supply an `Authorization` header if your backend requires one. The gateway
 forwards that header. No new gateway settings are required.
+
+## Hugging Face render input
+
+Within the gateway, use `From` to wrap a Responses request, then convert it to
+the renderer's `hf_chat_template::RenderInput`:
+
+```rust
+let input = ModelInput::from(&request); // Borrow; keep the request for forwarding.
+let render_input = input.render_input()?;
+let prompt = template.render(&render_input)?;
+```
+
+`ModelInput::from(request)` also accepts an owned request. Trait conversions are
+available as `RenderInput::try_from(&request)` and
+`let render_input: RenderInput = ModelInput::from(&request).try_into()?;`.
+The `RenderInput` conversion uses `TryFrom` because a stored conversation or item
+reference cannot become a complete prompt without resolving its history.
+
+The adapter supports inline text, instructions, system/developer/user/assistant
+messages, plaintext reasoning history, and function definitions, calls, and
+results. It targets text-only templates that expect string message content.
+Text parts use vLLM's newline separator; function arguments become JSON objects;
+adjacent reasoning, text, and calls are grouped into assistant messages.
+Sampling settings, metadata, and transport options do not become template variables.
+
+`RenderInputError` names an unsupported field without including request content.
+Stored state, images/files, encrypted reasoning, partial assistant continuation,
+managed or namespaced tools, and model-dependent prompt transformations need their
+own resolution or model-aware preprocessing. These errors apply to local render
+conversion; the Responses forwarding route continues to use its existing checks.
+
+Load `template` from the selected model's tokenizer assets using
+`ChatTemplate::from_tokenizer_config` or `ChatTemplate::from_template_and_config`.
+Those APIs supply the model's special tokens. This adapter creates renderer input;
+tokenization and prefix hashing are separate steps.

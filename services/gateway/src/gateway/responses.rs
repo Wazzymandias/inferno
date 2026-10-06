@@ -37,7 +37,7 @@ impl Gateway {
         headers: HeaderMap,
         request: CreateResponseRequest,
     ) -> Result<reqwest::Response, CreateResponseError> {
-        let input = ModelInput::from_responses(&request);
+        let input = ModelInput::from(&request);
         let backend = self.select(input, &self.pool).await?;
 
         backend

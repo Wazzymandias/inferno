@@ -1,4 +1,5 @@
 mod embedding;
+pub(crate) mod hugging_face;
 mod model_input;
 mod prefix;
 mod request;

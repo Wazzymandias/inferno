@@ -10,6 +10,7 @@ mod backend;
 mod cli;
 mod gateway;
 mod inference;
+mod telemetry;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
