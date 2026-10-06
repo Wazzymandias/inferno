@@ -10,6 +10,7 @@ import { ChatClient } from "./chat/ChatClient";
 import { Conversation } from "./chat/Conversation";
 import type { ChatConfiguration } from "./chat/protocol";
 import { Message } from "./chat/Message";
+import { Logo } from "./Logo";
 
 type Setup =
   | { readonly status: "loading" }
@@ -103,9 +104,7 @@ export function App() {
     <div className="chat-app">
       <header className="app-header">
         <a className="wordmark" href="/" aria-label="Chat home">
-          <span className="brand-mark" aria-hidden="true">
-            ✳
-          </span>{" "}
+          <Logo className="brand-mark" />
           Chat
         </a>
         <div className="header-controls">
@@ -171,9 +170,7 @@ export function App() {
         >
           {state.turns.length === 0 ? (
             <div className="welcome">
-              <div className="welcome-mark" aria-hidden="true">
-                ✳
-              </div>
+              <Logo className="welcome-mark" />
               <p className="eyebrow">A little room to think</p>
               <h1>What’s on your mind?</h1>
               <p className="welcome-description">

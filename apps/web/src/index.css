@@ -78,8 +78,10 @@ button:disabled {
   letter-spacing: -0.7px;
 }
 .brand-mark {
-  font-size: 32px;
-  line-height: 1;
+  display: block;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
   color: var(--accent);
 }
 .header-controls {
@@ -165,9 +167,11 @@ button:disabled {
   text-align: center;
 }
 .welcome-mark {
+  display: block;
+  width: 66px;
+  height: 66px;
+  flex-shrink: 0;
   color: var(--accent);
-  font-size: 66px;
-  line-height: 1;
   margin-bottom: 32px;
 }
 .eyebrow {
