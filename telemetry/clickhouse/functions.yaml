@@ -1,0 +1,14 @@
+# Adapted from SigNoz Foundry v0.3.0 for this Compose deployment.
+functions:
+  argument:
+  - name: buckets
+    type: Array(Float64)
+  - name: counts
+    type: Array(Float64)
+  - name: quantile
+    type: Float64
+  command: ./histogramQuantile
+  format: CSV
+  name: histogramQuantile
+  return_type: Float64
+  type: executable

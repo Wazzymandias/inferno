@@ -1,0 +1,170 @@
+# Based on SigNoz Foundry v0.3.0; maintained here as ordinary Compose configuration.
+# Standalone: docker compose -f telemetry/compose.yaml --profile metrics up -d --wait
+# With the app: add metrics to COMPOSE_PROFILES in .env, then docker compose up -d
+services:
+  signoz:
+    profiles: [metrics]
+    image: ${SIGNOZ_IMAGE:-signoz/signoz:v0.145.0@sha256:1301f2df51f01ba4227dfd5a8281e61d10aa09b771d2b20a30027bc68dba993d}
+    init: true
+    restart: unless-stopped
+    entrypoint: [/bin/sh, /etc/signoz/start-signoz.sh]
+    ports:
+      - "${SIGNOZ_HOST:-127.0.0.1}:${SIGNOZ_UI_PORT:-8081}:8080"
+    environment:
+      SIGNOZ_SQLSTORE_PROVIDER: postgres
+      SIGNOZ_SQLSTORE_POSTGRES_DSN: ${SIGNOZ_POSTGRES_DSN:-}
+      SIGNOZ_TELEMETRYSTORE_PROVIDER: clickhouse
+      SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN: ${SIGNOZ_CLICKHOUSE_DSN:-tcp://signoz-clickhouse:9000}
+    volumes:
+      - signoz-credentials:/run/signoz-credentials:ro
+      - ./start-signoz.sh:/etc/signoz/start-signoz.sh:ro
+    depends_on:
+      signoz-postgres:
+        condition: service_healthy
+      signoz-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, wget, --spider, -q, "http://127.0.0.1:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  signoz-otel-collector:
+    profiles: [metrics]
+    image: ${SIGNOZ_COLLECTOR_IMAGE:-signoz/signoz-otel-collector:v0.144.12@sha256:deb566a7a3c0ba544ee58ccc92ee1f0e6da827bc40383e52f3c824705e100a3d}
+    init: true
+    restart: unless-stopped
+    entrypoint: [/bin/sh, -c]
+    command:
+      - >-
+        /signoz-otel-collector migrate sync check &&
+        exec /signoz-otel-collector --config=/etc/otel-collector-config.yaml
+        --manager-config=/etc/opamp-config.yaml --copy-path=/var/tmp/collector-config.yaml
+    environment: &collector-environment
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: ${SIGNOZ_CLICKHOUSE_DSN:-tcp://signoz-clickhouse:9000}
+      SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
+      LOW_CARDINAL_EXCEPTION_GROUPING: "false"
+    ports:
+      - "${SIGNOZ_HOST:-127.0.0.1}:${SIGNOZ_OTLP_GRPC_PORT:-4317}:4317"
+      - "${SIGNOZ_HOST:-127.0.0.1}:${SIGNOZ_OTLP_HTTP_PORT:-4318}:4318"
+    volumes:
+      - ./otel-collector.yaml:/etc/otel-collector-config.yaml:ro
+      - ./opamp.yaml:/etc/opamp-config.yaml:ro
+    depends_on:
+      signoz:
+        condition: service_healthy
+    healthcheck:
+      # The pinned collector image has Bash but no HTTP client.
+      test:
+        - CMD
+        - bash
+        - -ec
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/13133;
+          printf 'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3;
+          IFS= read -r status <&3;
+          [[ "$$status" == *' 200 '* ]]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # One-off release job; the server and collector wait for successful migrations.
+  signoz-migrate:
+    profiles: [metrics]
+    image: ${SIGNOZ_COLLECTOR_IMAGE:-signoz/signoz-otel-collector:v0.144.12@sha256:deb566a7a3c0ba544ee58ccc92ee1f0e6da827bc40383e52f3c824705e100a3d}
+    init: true
+    restart: "no"
+    entrypoint: [/bin/sh, -c]
+    command:
+      - >-
+        /signoz-otel-collector migrate ready &&
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    environment: *collector-environment
+    depends_on:
+      signoz-clickhouse:
+        condition: service_healthy
+
+  # Generate the database credential once; subsequent starts reuse the volume.
+  signoz-init:
+    profiles: [metrics]
+    image: ${SIGNOZ_COLLECTOR_IMAGE:-signoz/signoz-otel-collector:v0.144.12@sha256:deb566a7a3c0ba544ee58ccc92ee1f0e6da827bc40383e52f3c824705e100a3d}
+    # The collector image defaults to UID 10001; the new named volume is root-owned.
+    user: "0:0"
+    restart: "no"
+    entrypoint: [/bin/sh, /etc/signoz/init-credentials.sh]
+    environment:
+      SIGNOZ_POSTGRES_PASSWORD: ${SIGNOZ_POSTGRES_PASSWORD:-}
+    volumes:
+      - signoz-credentials:/run/signoz-credentials
+      - ./init-credentials.sh:/etc/signoz/init-credentials.sh:ro
+
+  signoz-postgres:
+    profiles: [metrics]
+    image: ${SIGNOZ_POSTGRES_IMAGE:-postgres:16-bookworm@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: signoz
+      POSTGRES_USER: signoz
+      POSTGRES_PASSWORD_FILE: /run/signoz-credentials/postgres-password
+    volumes:
+      - signoz-postgres-data:/var/lib/postgresql/data
+      - signoz-credentials:/run/signoz-credentials:ro
+    depends_on:
+      signoz-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, pg_isready, -U, signoz, -d, signoz]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  signoz-clickhouse:
+    profiles: [metrics]
+    pull_policy: build
+    build:
+      context: ./clickhouse
+      args:
+        CLICKHOUSE_IMAGE: ${SIGNOZ_CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:25.12.5@sha256:cacf32d6884291dc2ff5e0156a97f46fc53ff7c929a7906d114e268a929dfd3a}
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+      CLICKHOUSE_CONFIG: /etc/clickhouse-server/signoz.yaml
+    volumes:
+      - signoz-clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/config.yaml:/etc/clickhouse-server/signoz.yaml:ro
+      - ./clickhouse/functions.yaml:/etc/clickhouse-server/functions.yaml:ro
+    depends_on:
+      signoz-clickhouse-keeper:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, --spider, -q, "http://127.0.0.1:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  signoz-clickhouse-keeper:
+    profiles: [metrics]
+    image: ${SIGNOZ_KEEPER_IMAGE:-clickhouse/clickhouse-keeper:25.12.5@sha256:525b8b0f93ccb371131c46f22a066ea43d33d74aba314203e8044609945d8524}
+    restart: unless-stopped
+    entrypoint: [/usr/bin/clickhouse-keeper, --config-file=/etc/clickhouse-keeper/keeper.yaml]
+    volumes:
+      - signoz-keeper-data:/var/lib/clickhouse-keeper
+      - ./keeper.yaml:/etc/clickhouse-keeper/keeper.yaml:ro
+    healthcheck:
+      test: [CMD, clickhouse-keeper-client, -h, localhost, -p, "9181", -q, ls]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+volumes:
+  signoz-credentials:
+  signoz-postgres-data:
+  signoz-clickhouse-data:
+  signoz-keeper-data:

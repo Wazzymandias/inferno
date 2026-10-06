@@ -1,4 +1,37 @@
+# Optional telemetry services use the metrics profile; include only modularizes them.
+include:
+  - ./telemetry/compose.yaml
+
 services:
+  web:
+    container_name: web
+    pull_policy: build
+    build:
+      context: ./apps/web
+      args:
+        BUN_IMAGE: ${BUN_IMAGE:-oven/bun:1.4.2}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${WEB_HOST_ADDR:-0.0.0.0}:${WEB_HOST_PORT:-3000}:${WEB_PORT:-3000}"
+    environment:
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: ${WEB_PORT:-3000}
+      # The default derives the gateway listener port from its owner. Override
+      # this URL to use any other Responses-compatible service.
+      INFERENCE_ENDPOINT: ${WEB_INFERENCE_ENDPOINT:-http://api:${API_PORT}/v1}
+      INFERENCE_MODEL: ${INFERENCE_MODEL:-}
+      INFERENCE_API_KEY: ${WEB_INFERENCE_API_KEY:-}
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - "const response = await fetch('http://127.0.0.1:' + process.env.WEB_PORT + '/healthz'); process.exit(response.ok ? 0 : 1);"
+
   api:
     # Rebuild changed source on plain `docker compose up`; unchanged layers stay cached.
     pull_policy: build
