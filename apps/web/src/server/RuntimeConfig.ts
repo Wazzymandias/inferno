@@ -13,6 +13,18 @@ const settings = {
     description: "Initial model ID. Otherwise choose or enter a model in chat.",
     fallback: "",
   },
+  temperature: {
+    environment: "INFERENCE_TEMPERATURE",
+    description:
+      "Sampling temperature from 0 to 2. 0 uses greedy decoding: choose the most likely next token.",
+    fallback: "0",
+  },
+  "max-output-tokens": {
+    environment: "INFERENCE_MAX_OUTPUT_TOKENS",
+    description:
+      "Positive integer token budget for each reply, including any reasoning tokens. Stops long generations at this limit.",
+    fallback: "512",
+  },
   host: {
     environment: "WEB_HOST",
     description: "HTTP listener address.",
@@ -29,6 +41,8 @@ export class RuntimeConfig {
   private constructor(
     readonly inferenceEndpoint: string,
     readonly model: string,
+    readonly temperature: number,
+    readonly maxOutputTokens: number,
     readonly host: string,
     readonly port: number,
     readonly apiKey: string,
@@ -88,6 +102,30 @@ export class RuntimeConfig {
       );
     }
 
+    const temperatureValue = value("temperature");
+    const temperature = Number(temperatureValue);
+    if (
+      !temperatureValue ||
+      !Number.isFinite(temperature) ||
+      temperature < 0 ||
+      temperature > 2
+    ) {
+      throw new Error(
+        "--temperature / INFERENCE_TEMPERATURE must be a number between 0 and 2; 0 uses greedy decoding.",
+      );
+    }
+    const maxOutputTokensValue = value("max-output-tokens");
+    const maxOutputTokens = Number(maxOutputTokensValue);
+    if (
+      !/^\d+$/.test(maxOutputTokensValue) ||
+      !Number.isSafeInteger(maxOutputTokens) ||
+      maxOutputTokens < 1
+    ) {
+      throw new Error(
+        "--max-output-tokens / INFERENCE_MAX_OUTPUT_TOKENS must be a positive integer token budget for each reply.",
+      );
+    }
+
     const port = value("port");
     if (!/^\d+$/.test(port) || Number(port) > 65535) {
       throw new Error(
@@ -101,6 +139,8 @@ export class RuntimeConfig {
     return new RuntimeConfig(
       url.href.replace(/\/+$/, ""),
       value("model"),
+      temperature,
+      maxOutputTokens,
       host,
       Number(port),
       environment["INFERENCE_API_KEY"]?.trim() ?? "",

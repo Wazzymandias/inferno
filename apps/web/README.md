@@ -28,14 +28,16 @@ New chat cancels any active generation and clears the transcript.
 Flags override environment variables. `bun run dev --help` or
 `bun run start --help` describes the flags without requiring an endpoint.
 
-| Flag                   | Environment          | Default                                      |
-| ---------------------- | -------------------- | -------------------------------------------- |
-| `--inference-endpoint` | `INFERENCE_ENDPOINT` | Required                                     |
-| `--model`              | `INFERENCE_MODEL`    | Choose or enter in the UI                    |
-| `--host`               | `WEB_HOST`           | `0.0.0.0`                                    |
-| `--port`               | `WEB_PORT`           | `3000`                                       |
-| —                      | `INFERENCE_API_KEY`  | No bearer token                              |
-| —                      | `NODE_ENV`           | Development; `bun run start` sets production |
+| Flag                   | Environment                   | Default                                      |
+| ---------------------- | ----------------------------- | -------------------------------------------- |
+| `--inference-endpoint` | `INFERENCE_ENDPOINT`          | Required                                     |
+| `--model`              | `INFERENCE_MODEL`             | Choose or enter in the UI                    |
+| `--temperature`        | `INFERENCE_TEMPERATURE`       | `0`: greedy decoding                         |
+| `--max-output-tokens`  | `INFERENCE_MAX_OUTPUT_TOKENS` | `512` generated tokens per reply             |
+| `--host`               | `WEB_HOST`                    | `0.0.0.0`                                    |
+| `--port`               | `WEB_PORT`                    | `3000`                                       |
+| —                      | `INFERENCE_API_KEY`           | No bearer token                              |
+| —                      | `NODE_ENV`                    | Development; `bun run start` sets production |
 
 Copy `.env.example` to `.env` inside `apps/web` and fill in `INFERENCE_ENDPOINT`
 to use environment configuration. Bun reads this app's `.env` automatically.
@@ -44,6 +46,16 @@ describe different connections. Compose maps `WEB_INFERENCE_ENDPOINT` into the
 web container's `INFERENCE_ENDPOINT` and `WEB_INFERENCE_API_KEY` into its
 `INFERENCE_API_KEY`. Its default web endpoint derives the gateway's configured
 listener port, and `INFERENCE_MODEL` remains the model's single configuration.
+
+Every chat request explicitly sends its temperature and reply budget to the
+provider. Temperature `0` uses greedy decoding: the model chooses the most likely
+next token instead of sampling randomly. The temperature must be between `0` and
+`2`; increasing it enables random sampling. The reply budget must be a positive
+integer and counts generated tokens, including any reasoning tokens, rather than
+characters. Increase it when longer replies are needed. The web app owns these
+defaults; Compose passes overrides from the root `.env` without redefining them.
+Apply changed Compose settings with `docker compose up -d --no-deps web`.
+These controls stabilize and bound generation; they do not verify factual claims.
 
 Endpoint URLs must use HTTP(S) without URL credentials, query parameters, or
 fragments. `INFERENCE_API_KEY` is optional and stays on the server. Browser

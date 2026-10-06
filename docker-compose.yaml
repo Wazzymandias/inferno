@@ -22,6 +22,9 @@ services:
       INFERENCE_ENDPOINT: ${WEB_INFERENCE_ENDPOINT:-http://api:${API_PORT}/v1}
       INFERENCE_MODEL: ${INFERENCE_MODEL:-}
       INFERENCE_API_KEY: ${WEB_INFERENCE_API_KEY:-}
+      # Optional overrides from .env; the web app owns generation defaults.
+      INFERENCE_TEMPERATURE:
+      INFERENCE_MAX_OUTPUT_TOKENS:
     depends_on:
       api:
         condition: service_started

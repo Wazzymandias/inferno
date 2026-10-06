@@ -3,6 +3,8 @@ import { ChatRequest } from "../src/chat/protocol";
 
 const ProviderRequest = z.object({
   ...ChatRequest.shape,
+  temperature: z.number().min(0).max(2),
+  max_output_tokens: z.number().int().positive(),
   stream: z.literal(true),
   store: z.literal(false),
 });

@@ -11,7 +11,7 @@ import type { RuntimeConfig } from "./RuntimeConfig";
 export class InferenceService {
   readonly #client: OpenAI;
 
-  constructor(config: RuntimeConfig) {
+  constructor(private readonly config: RuntimeConfig) {
     this.#client = new OpenAI({
       baseURL: config.inferenceEndpoint,
       // The SDK requires a nonempty key. This sentinel is never sent: the
@@ -56,6 +56,9 @@ export class InferenceService {
         {
           model: request.model,
           input: request.input,
+          // Send the chat policy explicitly; backend sampling defaults can differ.
+          temperature: this.config.temperature,
+          max_output_tokens: this.config.maxOutputTokens,
           stream: true,
           store: false,
         },

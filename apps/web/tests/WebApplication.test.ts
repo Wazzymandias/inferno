@@ -54,6 +54,8 @@ describe("web server and Responses API", () => {
     expect(events.at(-1)).toEqual({ type: "completed", text: inference.reply });
     expect(inference.requests[0]).toMatchObject({
       model: "test-model",
+      temperature: 0,
+      max_output_tokens: 512,
       stream: true,
       store: false,
     });
@@ -62,6 +64,24 @@ describe("web server and Responses API", () => {
       "Bearer server-test-secret",
     ]);
     expect(JSON.stringify(configuration)).not.toContain("server-test-secret");
+  });
+
+  test("sends configured generation settings to the provider", async () => {
+    await web.stop(true);
+    const config = RuntimeConfig.parse([], {
+      INFERENCE_ENDPOINT: inference.endpoint,
+      INFERENCE_TEMPERATURE: "0.25",
+      INFERENCE_MAX_OUTPUT_TOKENS: "64",
+      WEB_HOST: "127.0.0.1",
+      WEB_PORT: "0",
+    });
+    if (config === "help") throw new Error("Expected runtime configuration");
+    web = await new WebApplication(config).start();
+    expect((await send()).at(-1)?.type).toBe("completed");
+    expect(inference.requests[0]).toMatchObject({
+      temperature: 0.25,
+      max_output_tokens: 64,
+    });
   });
 
   test.each([

@@ -18,19 +18,67 @@ describe("runtime configuration", () => {
         "0",
         "--model",
         "selected-model",
+        "--temperature",
+        "0",
+        "--max-output-tokens",
+        "64",
       ],
       {
         INFERENCE_ENDPOINT: "http://unused.test",
         WEB_PORT: "4000",
         INFERENCE_MODEL: "other-model",
+        INFERENCE_TEMPERATURE: "0.8",
+        INFERENCE_MAX_OUTPUT_TOKENS: "4096",
       },
     );
     expect(result).toMatchObject({
       inferenceEndpoint: "https://example.com/team/api",
       port: 0,
       model: "selected-model",
+      temperature: 0,
+      maxOutputTokens: 64,
     });
   });
+
+  test("defaults to greedy decoding with a bounded reply", () => {
+    expect(
+      RuntimeConfig.parse([], { INFERENCE_ENDPOINT: "http://example.com/v1" }),
+    ).toMatchObject({ temperature: 0, maxOutputTokens: 512 });
+  });
+
+  test("accepts generation settings from the environment", () => {
+    expect(
+      RuntimeConfig.parse([], {
+        INFERENCE_ENDPOINT: "http://example.com/v1",
+        INFERENCE_TEMPERATURE: "0.3",
+        INFERENCE_MAX_OUTPUT_TOKENS: "1024",
+      }),
+    ).toMatchObject({ temperature: 0.3, maxOutputTokens: 1024 });
+  });
+
+  test.each(["", "-0.1", "2.1", "NaN", "Infinity", "invalid"])(
+    "rejects invalid sampling temperatures: %s",
+    (temperature) => {
+      expect(() =>
+        RuntimeConfig.parse([], {
+          INFERENCE_ENDPOINT: "http://example.com/v1",
+          INFERENCE_TEMPERATURE: temperature,
+        }),
+      ).toThrow("INFERENCE_TEMPERATURE");
+    },
+  );
+
+  test.each(["", "0", "-1", "1.5", "NaN", "9007199254740992", "invalid"])(
+    "rejects invalid reply budgets: %s",
+    (maxOutputTokens) => {
+      expect(() =>
+        RuntimeConfig.parse([], {
+          INFERENCE_ENDPOINT: "http://example.com/v1",
+          INFERENCE_MAX_OUTPUT_TOKENS: maxOutputTokens,
+        }),
+      ).toThrow("INFERENCE_MAX_OUTPUT_TOKENS");
+    },
+  );
 
   test.each([
     "not-a-url",

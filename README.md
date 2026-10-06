@@ -82,6 +82,11 @@ ID (the `INFERENCE_MODEL` value in your root `.env` for the local setup).
 service derives its default endpoint from the API service's configured port and uses the same
 `INFERENCE_MODEL`. `WEB_INFERENCE_ENDPOINT` selects another service;
 `WEB_INFERENCE_API_KEY` supplies its optional server-side bearer token.
+Chat explicitly uses greedy decoding (`INFERENCE_TEMPERATURE=0`) and a generated
+token budget per reply (`INFERENCE_MAX_OUTPUT_TOKENS=512`, including reasoning).
+Both settings are validated by the web app, which owns their defaults; Compose
+passes overrides from `.env`. Increase the reply budget for longer answers.
+Apply changed chat settings with `docker compose up -d --no-deps web`.
 `WEB_HOST_ADDR` and `WEB_HOST_PORT` set the published bind address and port;
 `WEB_PORT` sets the container's listener port. `BUN_IMAGE` selects the declared
 Bun build and runtime image.
