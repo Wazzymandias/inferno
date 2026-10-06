@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+
+use tokio_util::sync::CancellationToken;
 
 use axum::{
     Router,
@@ -7,8 +9,11 @@ use axum::{
     routing::{any, get},
 };
 
-use super::routes::{app, strip_transport_headers};
-use crate::backend::Backend;
+use super::{
+    Gateway,
+    routes::{app, strip_transport_headers},
+};
+use crate::backend::{Backend, Pool};
 use axum::http::HeaderValue;
 use reqwest::{Client, Url};
 
@@ -123,12 +128,17 @@ async fn preserves_backend_prefix_query_body_and_error_response() {
         ),
     );
     let (upstream, mock_task) = serve(mock).await;
-    let backend = Backend::new(
+    let mut pool = Pool::new();
+    pool.add(
         Url::parse(&format!("{upstream}/engines/v1")).unwrap(),
         Duration::from_secs(5),
     )
     .unwrap();
-    let (gateway, api_task) = serve(app(backend, 1024)).await;
+    let (gateway, api_task) = serve(app(
+        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0).with_pool(pool)),
+        1024,
+    ))
+    .await;
     let response = Client::new()
         .post(format!("{gateway}/v1/chat/completions?trace=1"))
         .header(header::AUTHORIZATION, "Bearer test")
@@ -170,12 +180,17 @@ async fn streams_first_event_before_backend_finishes() {
         }),
     );
     let (upstream, mock_task) = serve(mock).await;
-    let backend = Backend::new(
+    let mut pool = Pool::new();
+    pool.add(
         Url::parse(&format!("{upstream}/v1")).unwrap(),
         Duration::from_secs(5),
     )
     .unwrap();
-    let (gateway, api_task) = serve(app(backend, 1024)).await;
+    let (gateway, api_task) = serve(app(
+        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0).with_pool(pool)),
+        1024,
+    ))
+    .await;
     tx.send(Ok(Bytes::from_static(b"data: first\n\n")))
         .await
         .unwrap();
@@ -223,12 +238,17 @@ async fn times_out_an_unfinished_backend_stream() {
         }),
     );
     let (upstream, mock_task) = serve(mock).await;
-    let backend = Backend::new(
+    let mut pool = Pool::new();
+    pool.add(
         Url::parse(&format!("{upstream}/v1")).unwrap(),
         Duration::from_secs(1),
     )
     .unwrap();
-    let (gateway, api_task) = serve(app(backend, 1024)).await;
+    let (gateway, api_task) = serve(app(
+        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0).with_pool(pool)),
+        1024,
+    ))
+    .await;
     let mut response = Client::new()
         .get(format!("{gateway}/v1/chat/completions"))
         .send()
@@ -251,12 +271,17 @@ async fn distinguishes_liveness_backend_failure_and_oversized_request() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let backend = Backend::new(
+    let mut pool = Pool::new();
+    pool.add(
         Url::parse(&format!("http://{address}/v1")).unwrap(),
         Duration::from_secs(1),
     )
     .unwrap();
-    let (gateway, task) = serve(app(backend, 4)).await;
+    let (gateway, task) = serve(app(
+        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0).with_pool(pool)),
+        4,
+    ))
+    .await;
     let client = Client::new();
     for (path, expected) in [
         ("/healthz", StatusCode::OK),
@@ -302,7 +327,6 @@ fn removes_all_connection_nominated_headers() {
 
 #[tokio::test]
 async fn shutdown_deadline_bounds_an_active_request() {
-    // This test starts a router directly, without Backend's TLS initialization.
     install_crypto_provider();
     let client = Client::new();
     let (started_tx, mut started_rx) = mpsc::channel(1);
@@ -318,36 +342,41 @@ async fn shutdown_deadline_bounds_an_active_request() {
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(super::shutdown::serve(
-        listener,
-        router,
-        async {
-            let _ = stop_rx.await;
-        },
-        Duration::from_millis(50),
-    ));
+    let (upstream, mock_task) = serve(router).await;
+    let mut pool = Pool::new();
+    pool.add(Url::parse(&upstream).unwrap(), Duration::from_secs(5))
+        .unwrap();
+    let mut gateway = Gateway::new(address.ip(), address.port()).with_pool(pool);
+    gateway.shutdown_timeout = Duration::from_millis(50);
+    let shutdown = CancellationToken::new();
+    let server = tokio::spawn(Arc::new(gateway).serve_http(listener, shutdown.clone()));
     let request =
-        tokio::spawn(async move { client.get(format!("http://{address}/hang")).send().await });
+        tokio::spawn(async move { client.get(format!("http://{address}/v1/hang")).send().await });
     tokio::time::timeout(Duration::from_secs(2), started_rx.recv())
         .await
         .unwrap()
         .unwrap();
-    stop_tx.send(()).unwrap();
+    shutdown.cancel();
     let result = tokio::time::timeout(Duration::from_secs(2), server)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
     request.abort();
+    mock_task.abort();
 }
 
 #[tokio::test]
 async fn idle_server_shuts_down_cleanly() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut gateway = Gateway::new(address.ip(), address.port());
+    gateway.shutdown_timeout = Duration::from_secs(1);
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
     tokio::time::timeout(
         Duration::from_secs(2),
-        super::shutdown::serve(listener, Router::new(), async {}, Duration::from_secs(1)),
+        Arc::new(gateway).serve_http(listener, shutdown),
     )
     .await
     .unwrap()

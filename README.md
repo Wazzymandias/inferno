@@ -1,7 +1,7 @@
 # Infergate
 
-Infergate is a multi-model LLM gateway that runs inference on user requests for intelligent routing. The Rust gateway lives in
-[`services/gateway`](services/gateway/README.md).
+Infergate is a multi-model LLM gateway that runs "pre-inference" on user requests for intelligent routing. 
+The Rust gateway lives in [`services/gateway`](services/gateway/README.md).
 
 ## Requirements
 

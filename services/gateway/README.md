@@ -51,3 +51,40 @@ Compose reads the root `.env` and passes the settings to the container. For a na
 API_ADDRESS=127.0.0.1 API_PORT=8080 INFERENCE_ENDPOINT=http://localhost:8000/v1 \
   cargo run --package infergate --locked -- --inference-timeout-seconds 120
 ```
+
+## Responses API
+
+Send requests to `POST /v1/responses` with `Content-Type: application/json`.
+The gateway reads the body with the Responses API request types. It checks the
+request before backend selection. Do not supply both `conversation` and
+`previous_response_id`. Set `stream` to `true` when you supply `stream_options`.
+The backend checks model support and model-specific limits.
+
+The gateway serializes the typed request as JSON and sends it to the selected
+backend's `responses` endpoint. Optional null fields can be omitted during
+serialization. It keeps the configured URL prefix, query parameters, and application
+headers. It returns the backend's status, application headers, and body.
+For `stream: true`, it sends each chunk as it arrives. It does not collect the
+complete event stream or change the event format.
+
+The backend must support the
+[OpenAI Responses API](https://developers.openai.com/api/reference/python/resources/responses/methods/create).
+It owns stored responses, conversation state, background jobs, and tool execution.
+The existing `/v1` forwarding route also sends retrieval, deletion, cancellation,
+and input-item requests to the backend. The gateway currently selects the first
+backend in pool order. It does not distribute requests between backends.
+
+The gateway returns JSON error objects for invalid create requests and backend
+connection failures. The configured body limit and timeout also apply to this
+route. The gateway forwards backend errors without changes.
+
+Replace `your-model-id` with a model ID supported by your backend:
+
+```sh
+curl --no-buffer http://localhost:8080/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"your-model-id","input":"Say hello.","stream":true}'
+```
+
+Supply an `Authorization` header if your backend requires one. The gateway
+forwards that header. No new gateway settings are required.

@@ -7,14 +7,17 @@ edition = "2024"
 workspace = true
 
 [dependencies]
-axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
 bpaf = { version = "0.9.27", features = ["derive"] }
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json"] }
 rustls-graviola = { version = "0.4.0", default-features = false }
+serde = { version = "1.0.229", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1.0.151", default-features = false, features = ["alloc"] }
+serde_with = { version = "3.24.0", default-features = false, features = ["macros"] }
 tokio = { version = "1.53.1", default-features = false, features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync"] }
+tokio-util = { version = "0.7.19", default-features = false, features = ["rt"] }
 webpki-root-certs = { version = "1.0.9", default-features = false }
 
 [dev-dependencies]
 futures-util = { version = "0.3.34", default-features = false }
 tokio-rustls = { version = "0.26.6", default-features = false }
-

@@ -1,25 +1,41 @@
 //! HTTP routing and streaming proxy behavior.
 
-use crate::backend::Backend;
+use std::sync::Arc;
+
+use super::{CreateResponseError, Gateway};
+use crate::inference::{CreateResponseRequest, ModelInput};
 use axum::{
-    Router,
+    Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
     http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::{any, get, post},
 };
 
-pub(super) fn app(backend: Backend, body_limit: usize) -> Router {
+pub(super) fn app(gateway: Arc<Gateway>, body_limit: usize) -> Router {
     Router::new()
         .route("/healthz", get(|| async { StatusCode::OK }))
         .route("/readyz", get(ready))
+        .route(
+            "/v1/responses",
+            post(create_response).fallback(|| async {
+                responses_error(
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "invalid_request_error",
+                    "Use POST to create a response.",
+                )
+            }),
+        )
         .route("/v1/{*path}", any(forward))
         .layer(DefaultBodyLimit::max(body_limit))
-        .with_state(backend)
+        .with_state(gateway)
 }
 
-async fn ready(State(backend): State<Backend>) -> StatusCode {
+async fn ready(State(gateway): State<Arc<Gateway>>) -> StatusCode {
+    let Ok(backend) = gateway.select(ModelInput::Unspecified, &gateway.pool).await else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
     match backend.client.get(backend.url("models", None)).send().await {
         Ok(response) if response.status().is_success() => StatusCode::OK,
         _ => StatusCode::SERVICE_UNAVAILABLE,
@@ -27,17 +43,21 @@ async fn ready(State(backend): State<Backend>) -> StatusCode {
 }
 
 async fn forward(
-    State(backend): State<Backend>,
+    State(gateway): State<Arc<Gateway>>,
     method: Method,
     uri: Uri,
     mut headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let Ok(backend) = gateway.select(ModelInput::Unspecified, &gateway.pool).await else {
+        return backend_unavailable(StatusCode::BAD_GATEWAY);
+    };
     let path = uri
         .path()
         .strip_prefix("/v1/")
         .expect("route has /v1/ prefix");
     strip_transport_headers(&mut headers);
+
     let response = match backend
         .client
         .request(method, backend.url(path, uri.query()))
@@ -48,22 +68,90 @@ async fn forward(
     {
         Ok(response) => response,
         Err(error) => {
-            let error = error.without_url();
-            println!("inference request failed: {error}");
-            let status = if error.is_timeout() {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
-            return (
-                status,
-                [(header::CONTENT_TYPE, "application/json")],
-                r#"{"error":{"message":"inference backend unavailable"}}"#,
-            )
-                .into_response();
+            return backend_unavailable(backend_error_status(error));
         }
     };
 
+    upstream_response(response)
+}
+
+async fn create_response(
+    State(gateway): State<Arc<Gateway>>,
+    uri: Uri,
+    mut headers: HeaderMap,
+    request: Result<Json<CreateResponseRequest>, JsonRejection>,
+) -> Result<Response, CreateResponseError> {
+    let Json(request) = request?;
+    strip_transport_headers(&mut headers);
+    let response = gateway
+        .create_response(uri.query(), headers, request)
+        .await?;
+    Ok(upstream_response(response))
+}
+
+impl IntoResponse for CreateResponseError {
+    fn into_response(self) -> Response {
+        let status = match self {
+            Self::InvalidJson(error) => {
+                let status = match &error {
+                    JsonRejection::JsonDataError(_) => StatusCode::BAD_REQUEST,
+                    _ => error.status(),
+                };
+                return responses_error(status, "invalid_request_error", &error.body_text());
+            }
+            Self::InvalidRequest(error) => {
+                return responses_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    &error.to_string(),
+                );
+            }
+            Self::NoBackend => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Backend(error) if error.is_builder() => {
+                return responses_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "The gateway could not build the backend request.",
+                );
+            }
+            Self::Backend(error) => backend_error_status(error),
+        };
+        responses_error(
+            status,
+            "server_error",
+            "The inference backend is not available.",
+        )
+    }
+}
+
+fn responses_error(status: StatusCode, error_type: &str, message: &str) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::json!({
+            "error": {
+                "message": message,
+                "type": error_type,
+                "param": null,
+                "code": null,
+            }
+        })
+        .to_string(),
+    )
+        .into_response()
+}
+
+fn backend_error_status(error: reqwest::Error) -> StatusCode {
+    let error = error.without_url();
+    println!("inference request failed: {error}");
+    if error.is_timeout() {
+        StatusCode::GATEWAY_TIMEOUT
+    } else {
+        StatusCode::BAD_GATEWAY
+    }
+}
+
+fn upstream_response(response: reqwest::Response) -> Response {
     let status = response.status();
     let mut headers = response.headers().clone();
     strip_transport_headers(&mut headers);
@@ -72,6 +160,15 @@ async fn forward(
     *outgoing.status_mut() = status;
     *outgoing.headers_mut() = headers;
     outgoing
+}
+
+fn backend_unavailable(status: StatusCode) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/json")],
+        r#"{"error":{"message":"inference backend unavailable"}}"#,
+    )
+        .into_response()
 }
 
 pub(super) fn strip_transport_headers(headers: &mut HeaderMap) {
