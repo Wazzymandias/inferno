@@ -27,9 +27,11 @@ docker build --file services/gateway/Dockerfile --tag infergate:local .
 
 ## CLI and runtime configuration
 
-Argument parsing and configuration live in `src/cli/config.rs`, with `src/cli.rs`
-as the module entry point, and use [bpaf](https://docs.rs/bpaf/).
+Serve and render commands live in `src/cli/serve.rs` and `src/cli/render.rs`,
+with `src/cli.rs` as the command parser. They use [bpaf](https://docs.rs/bpaf/).
 Run `cargo run --package infergate -- --help` or `cargo run --package infergate -- --version` without configuring a backend.
+Use `cargo run --package infergate -- serve --help` for server options. A subcommand
+is required: `serve` starts the gateway, and `render` prints input token IDs.
 Flags override environment variables; omitted values use the defaults below.
 Invalid configuration fails before the listener opens.
 
@@ -49,7 +51,7 @@ Compose reads the root `.env` and passes the settings to the container. For a na
 
 ```sh
 API_ADDRESS=127.0.0.1 API_PORT=8080 INFERENCE_ENDPOINT=http://localhost:8000/v1 \
-  cargo run --package infergate --locked -- --inference-timeout-seconds 120
+  cargo run --package infergate --locked -- serve --inference-timeout-seconds 120
 ```
 
 ## Responses API

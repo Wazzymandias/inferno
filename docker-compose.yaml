@@ -36,6 +36,7 @@ services:
         - "const response = await fetch('http://127.0.0.1:' + process.env.WEB_PORT + '/healthz'); process.exit(response.ok ? 0 : 1);"
 
   api:
+    command: [serve]
     # Rebuild changed source on plain `docker compose up`; unchanged layers stay cached.
     pull_policy: build
     build:

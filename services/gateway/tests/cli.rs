@@ -20,6 +20,7 @@ fn command() -> Command {
 fn configured() -> Command {
     let mut command = command();
     command
+        .arg("serve")
         .env("API_ADDRESS", "127.0.0.1")
         .env("API_PORT", "0")
         .env("INFERENCE_ENDPOINT", "http://localhost/v1");
@@ -33,6 +34,11 @@ fn stderr(output: &Output) -> String {
 #[test]
 fn help_and_version_need_no_configuration() {
     let help = command().arg("--help").output().unwrap();
+    assert!(help.status.success(), "{}", stderr(&help));
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("serve"));
+    assert!(text.contains("render"));
+    let help = command().args(["serve", "--help"]).output().unwrap();
     assert!(help.status.success(), "{}", stderr(&help));
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("--shutdown-timeout-seconds"));
@@ -49,6 +55,7 @@ fn help_and_version_need_no_configuration() {
 #[test]
 fn rejects_missing_unknown_and_invalid_configuration() {
     assert!(!command().output().unwrap().status.success());
+    assert!(!command().arg("serve").output().unwrap().status.success());
     assert!(
         !configured()
             .arg("--unknown")
