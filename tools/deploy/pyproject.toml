@@ -1,5 +1,5 @@
 [project]
-name = "infergate-mlx"
+name = "inferno-mlx"
 version = "0.0.1"
 requires-python = "==3.12.*"
 dependencies = ["vllm==0.31.0+cpu", "vllm-metal==0.31.0"]

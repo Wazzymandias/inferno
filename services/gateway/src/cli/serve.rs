@@ -18,7 +18,7 @@ use crate::{
     inference::{InputProcessor, ModelConfig},
 };
 
-/// Infergate: an OpenAI-compatible inference gateway. Flags override environment variables.
+/// Inferno: an OpenAI-compatible inference gateway. Flags override environment variables.
 #[derive(Clone, Debug, Bpaf)]
 #[bpaf(generate(serve_command))]
 pub(crate) struct ServeCommand {

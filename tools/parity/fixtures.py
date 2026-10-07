@@ -31,7 +31,7 @@ def fixture_model(directory: Path):
 
 
 async def generate():
-    subprocess.run(["cargo", "build", "--locked", "--package", "infergate"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "build", "--locked", "--package", "inferno"], cwd=ROOT, check=True)
     cases = json.loads(Path(__file__).with_name("cases.json").read_text())
     cases.extend([
         {"name":"tool-result-empty-parts", "request":{"input":[{"role":"user","content":"Q"},{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":""},{"type":"input_text","text":"B"}]}]}},
@@ -40,7 +40,7 @@ async def generate():
         {"name":"reasoning-effort", "request":{"input":"Think", "reasoning":{"effort":"high"}}},
         {"name":"empty-parts", "request":{"input":[{"role":"user","content":[{"type":"input_text","text":""},{"type":"input_text","text":"B"}]}]}},
     ])
-    with tempfile.TemporaryDirectory(prefix="infergate-fixture-model-") as temp:
+    with tempfile.TemporaryDirectory(prefix="inferno-fixture-model-") as temp:
         model = Path(temp)
         fixture_model(model)
         for content_format in ("string", "openai"):

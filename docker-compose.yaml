@@ -1,3 +1,5 @@
+name: inferno
+
 # Optional telemetry services use the metrics profile; include only modularizes them.
 include:
   - ./telemetry/compose.yaml
@@ -18,14 +20,14 @@ services:
       WEB_PORT: ${WEB_PORT:-3000}
       # The default derives the gateway listener port from its owner. Override
       # this URL to use any other Responses-compatible service.
-      INFERENCE_ENDPOINT: ${WEB_INFERENCE_ENDPOINT:-http://api:${API_PORT}/v1}
+      INFERENCE_ENDPOINT: ${WEB_INFERENCE_ENDPOINT:-http://gateway:${API_PORT}/v1}
       INFERENCE_MODEL: ${INFERENCE_MODEL:-}
       INFERENCE_API_KEY: ${WEB_INFERENCE_API_KEY:-}
       # Optional overrides from .env; the web app owns generation defaults.
       INFERENCE_TEMPERATURE:
       INFERENCE_MAX_OUTPUT_TOKENS:
     depends_on:
-      api:
+      gateway:
         condition: service_started
     healthcheck:
       test:
@@ -34,7 +36,7 @@ services:
         - -e
         - "const response = await fetch('http://127.0.0.1:' + process.env.WEB_PORT + '/healthz'); process.exit(response.ok ? 0 : 1);"
 
-  api:
+  gateway:
     command: [serve]
     # Rebuild changed source on plain `docker compose up`; unchanged layers stay cached.
     pull_policy: build
@@ -59,7 +61,7 @@ services:
       MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-1048576}
       SHUTDOWN_TIMEOUT_SECONDS: ${SHUTDOWN_TIMEOUT_SECONDS:-5}
     volumes:
-      - model-cache:/var/cache/infergate
+      - model-cache:/var/cache/inferno
 
 volumes:
   # Disposable model configuration cache; the active backend owns its contents.

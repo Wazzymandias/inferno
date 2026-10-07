@@ -19,7 +19,7 @@ async def main():
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--model", required=True, help="served model name for this comparison")
     arguments = parser.parse_args()
-    subprocess.run(["cargo", "build", "--locked", "--package", "infergate"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "build", "--locked", "--package", "inferno"], cwd=ROOT, check=True)
     cases = json.loads(Path(__file__).with_name("cases.json").read_text())
     state = native_renderer(str(arguments.model_path.resolve()), arguments.model)
     matched = rejected = 0

@@ -18,7 +18,7 @@ async fn deployment() -> (Backend, Arc<AtomicUsize>, tokio::task::JoinHandle<()>
     let requests = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&requests);
     let router = Router::new().route(
-        "/v1/infergate/model-config",
+        "/v1/inferno/model-config",
         get(move |uri: Uri| {
             let observed = Arc::clone(&observed);
             async move {

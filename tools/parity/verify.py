@@ -27,7 +27,7 @@ def prepare_cases(cases: list[dict], model: str, configuration: dict):
         def do_GET(self):
             assert self.headers.get("Authorization") == "Bearer configuration-test-token"
             parsed = urllib.parse.urlsplit(self.path)
-            assert parsed.path == "/v1/infergate/model-config"
+            assert parsed.path == "/v1/inferno/model-config"
             assert urllib.parse.parse_qs(parsed.query) == {"model": [model]}
             discovery_calls.append(self.path)
             body = json.dumps(configuration).encode()
@@ -50,20 +50,20 @@ def prepare_cases(cases: list[dict], model: str, configuration: dict):
         def log_message(self, *_):
             pass
 
-    with tempfile.TemporaryDirectory(prefix="infergate-cache-test-") as cache, ThreadingHTTPServer(("127.0.0.1", 0), Capture) as backend:
+    with tempfile.TemporaryDirectory(prefix="inferno-cache-test-") as cache, ThreadingHTTPServer(("127.0.0.1", 0), Capture) as backend:
         environment = os.environ | {"XDG_CACHE_HOME": cache, "INFERENCE_API_KEY": "configuration-test-token"}
         endpoint = f"http://127.0.0.1:{backend.server_port}/v1"
         threading.Thread(target=backend.serve_forever, daemon=True).start()
         gateway = subprocess.Popen([
-            str(ROOT / "target/debug/infergate"), "serve", "--api-address", "127.0.0.1",
+            str(ROOT / "target/debug/inferno"), "serve", "--api-address", "127.0.0.1",
             "--api-port", "0", "--inference-endpoint",
             endpoint, "--model", model,
         ], stdout=subprocess.PIPE, text=True, env=environment)
         try:
             ready = gateway.stdout.readline().strip()
-            if not ready.startswith("infergate listening on "):
+            if not ready.startswith("inferno listening on "):
                 raise RuntimeError("gateway failed to discover model configuration")
-            address = ready.removeprefix("infergate listening on ")
+            address = ready.removeprefix("inferno listening on ")
             requests = []
             for case in cases:
                 body = json.dumps(case["request"] | {"model": model, "store": False}).encode()
@@ -87,7 +87,7 @@ def prepare_cases(cases: list[dict], model: str, configuration: dict):
         results = []
         for case, wire in zip(cases, requests, strict=True):
             rendered = subprocess.run([
-                str(ROOT / "target/debug/infergate"), "render", "--model", model,
+                str(ROOT / "target/debug/inferno"), "render", "--model", model,
                 "--inference-endpoint", endpoint,
             ], input=json.dumps(case["request"] | {"model":model, "store":False}),
                 text=True, capture_output=True, env=environment, timeout=30)
@@ -100,12 +100,12 @@ def main() -> None:
     parser.add_argument("--inference-endpoint", required=True, help="running native vLLM /v1 endpoint")
     parser.add_argument("--model", required=True, help="model ID served by that backend")
     arguments = parser.parse_args()
-    subprocess.run(["cargo", "build", "--package", "infergate", "--locked"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "build", "--package", "inferno", "--locked"], cwd=ROOT, check=True)
     cases = json.loads(Path(__file__).with_name("cases.json").read_text())
     headers = {"Content-Type": "application/json"}
     if os.environ.get("INFERENCE_API_KEY"):
         headers["Authorization"] = "Bearer " + os.environ["INFERENCE_API_KEY"]
-    url = arguments.inference_endpoint.rstrip("/") + "/infergate/model-config?" + urllib.parse.urlencode({"model": arguments.model})
+    url = arguments.inference_endpoint.rstrip("/") + "/inferno/model-config?" + urllib.parse.urlencode({"model": arguments.model})
     with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
         configuration = json.load(response)
     prepared = prepare_cases(cases, arguments.model, configuration)

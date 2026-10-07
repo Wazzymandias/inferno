@@ -49,7 +49,7 @@ impl ModelConfig {
         let config: Self = serde_json::from_slice(bytes).map_err(|error| {
             InputError::with_source("model", "invalid model configuration", Box::new(error))
         })?;
-        if config.format != "infergate-vllm-0.31.0-model-config-v1" {
+        if config.format != "inferno-vllm-0.31.0-model-config-v1" {
             return Err(InputError::new(
                 "model",
                 "unsupported model configuration version",
@@ -86,7 +86,7 @@ impl ModelCache {
                 )
             })?;
         Ok(Self::in_directory(
-            root.join("infergate/models"),
+            root.join("inferno/models"),
             backend,
             model,
         ))
@@ -129,7 +129,7 @@ impl ModelCache {
         let bytes = backend.client.get(config_url(backend, model)).send().await
             .and_then(reqwest::Response::error_for_status)
             .map_err(|error| InputError::with_source(
-                "model", "cannot discover model configuration; the backend must enable the infergate model configuration integration", Box::new(error),
+                "model", "cannot discover model configuration; the backend must enable the inferno model configuration integration", Box::new(error),
             ))?.bytes().await?;
         let config = ModelConfig::parse(&bytes, model)?;
         self.write(&bytes).map_err(|error| {
@@ -149,7 +149,7 @@ impl ModelCache {
 }
 
 fn config_url(backend: &Backend, model: &str) -> reqwest::Url {
-    let mut url = backend.url("infergate/model-config", None);
+    let mut url = backend.url("inferno/model-config", None);
     url.query_pairs_mut().append_pair("model", model);
     url
 }

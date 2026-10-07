@@ -1,8 +1,10 @@
-# Infergate
+# Inferno
 
-Infergate forwards native vLLM Responses requests through a Rust gateway and
+Inferno gateway routes multi-model Response API requests using "pre-inference" for enhanced routing and
 provides a React chat interface. The gateway lives in
 [`services/gateway`](services/gateway/README.md).
+
+> ⚠️NOTE: Inferno local models, builds and development require MacOS with Apple Silicon
 
 ## Requirements
 
@@ -174,7 +176,7 @@ Set these in `.env` or export them in the shell:
 **Discover the active publisher** on the native server, using its normal API authentication:
 
 ```http
-GET /v1/infergate/kv-events?model=<served-model>
+GET /v1/inferno/kv-events?model=<served-model>
 ```
 
 - The response contains resolved endpoints, the topic, the native `instance_id`,
@@ -265,7 +267,7 @@ export endpoints, and shutdown instructions.
 | Check backend reachability | `/readyz` |
 | Check web process | `docker compose ps web` |
 | Web logs | `docker compose logs web` |
-| API logs | `docker compose logs api` |
+| Gateway logs | `docker compose logs gateway` |
 | Deployment and model logs | Streamed by deployment commands; retained at the log path printed by the launcher. |
 | Run with live terminal output | `just deploy --detached=false` |
 | Verify the web app through the configured model | `just web test` |

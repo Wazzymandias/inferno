@@ -1,6 +1,6 @@
 # Gateway
 
-The `infergate` Rust service forwards inference requests and streams backend
+The `inferno` Rust service forwards inference requests and streams backend
 responses. It exposes `/healthz`, `/readyz`, and the `/v1` API.
 
 The package, source, tests, Justfile, and Dockerfile live in this directory. The
@@ -22,15 +22,15 @@ See the [repository quickstart](../../README.md#quickstart) for Compose setup.
 The image uses the repository root as its build context:
 
 ```sh
-docker build --file services/gateway/Dockerfile --tag infergate:local .
+docker build --file services/gateway/Dockerfile --tag inferno:local .
 ```
 
 ## CLI and runtime configuration
 
 Serve and render commands live in `src/cli/serve.rs` and `src/cli/render.rs`,
 with `src/cli.rs` as the command parser. They use [bpaf](https://docs.rs/bpaf/).
-Run `cargo run --package infergate -- --help` or `cargo run --package infergate -- --version` without configuring a backend.
-Use `cargo run --package infergate -- serve --help` for server options. A subcommand
+Run `cargo run --package inferno -- --help` or `cargo run --package inferno -- --version` without configuring a backend.
+Use `cargo run --package inferno -- serve --help` for server options. A subcommand
 is required: `serve` starts the gateway, and `render` prints locally prepared token IDs and prefix hashes.
 Flags override environment variables; omitted values use the defaults below.
 Invalid configuration fails before the listener opens.
@@ -55,7 +55,7 @@ Compose reads the root `.env` and passes the settings to the container. For a na
 ```sh
 INFERENCE_MODEL=your-model-id \
 API_ADDRESS=127.0.0.1 API_PORT=8080 INFERENCE_ENDPOINT=http://localhost:8000/v1 \
-  cargo run --package infergate --locked -- serve --inference-timeout-seconds 120
+  cargo run --package inferno --locked -- serve --inference-timeout-seconds 120
 ```
 
 ## Responses API
@@ -124,7 +124,7 @@ variant to a response without exposing source diagnostics in runtime logs.
 The gateway performs no render RPC. Inspect the same preparation with:
 
 ```sh
-cargo run --locked --package infergate -- render \
+cargo run --locked --package inferno -- render \
   --model your-model-id --inference-endpoint http://localhost:8002/v1 < request.json
 ```
 
@@ -139,13 +139,13 @@ API field and is not substituted for native cache salt.
 
 `just deploy` installs the native integration and passes the same `INFERENCE_MODEL`
 to the gateway. Before opening its listener, the gateway fetches
-`GET /v1/infergate/model-config?model=...` from `INFERENCE_ENDPOINT`. That startup
+`GET /v1/inferno/model-config?model=...` from `INFERENCE_ENDPOINT`. That startup
 request transfers the loaded tokenizer, resolved templates, and deployment policy.
 It carries no Responses request and performs no rendering. Per-request preparation
 uses only the processor's in-memory assets.
 
 The gateway caches the configuration automatically under
-`$XDG_CACHE_HOME/infergate/models` (default `$HOME/.cache/infergate/models`), keyed
+`$XDG_CACHE_HOME/inferno/models` (default `$HOME/.cache/inferno/models`), keyed
 by backend endpoint and model. Compose supplies a writable, disposable named
 volume. There are no asset-directory settings or shared filesystem mounts.
 `serve` always refreshes from the active backend and fails if discovery fails;
@@ -190,7 +190,7 @@ The launcher builds the KV events JSON automatically from
 For a separate server, the JSON above is supplied directly to vLLM. Use
 `tcp://*:0` for independent OS-assigned event and replay ports, or explicit ZMQ
 endpoints for your deployment. No port relationship to HTTP is required.
-`GET /v1/infergate/kv-events?model=...` on the native server returns the active
+`GET /v1/inferno/kv-events?model=...` on the native server returns the active
 instance and resolved publisher sources under native API authentication.
 Rediscover after a restart. Startup requires prefix caching and a ZMQ publisher
 with replay; native configurations that disable prefix caching fail startup.

@@ -13,7 +13,7 @@ use render::render_command;
 pub(crate) use serve::ServeCommand;
 use serve::serve_command;
 
-/// Infergate: forward Responses requests, or inspect locally prepared tokens and prefix hashes.
+/// Inferno: forward Responses requests, or inspect locally prepared tokens and prefix hashes.
 #[derive(Debug, Bpaf)]
 #[bpaf(options, generate(options), version)]
 pub(crate) enum GatewayCommand {

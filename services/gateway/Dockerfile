@@ -6,14 +6,14 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY services/gateway/Cargo.toml ./services/gateway/Cargo.toml
 COPY services/gateway/src ./services/gateway/src
-RUN rustup toolchain install nightly --profile minimal && cargo build --package infergate --bin infergate --release --locked
+RUN rustup toolchain install nightly --profile minimal && cargo build --package inferno --bin inferno --release --locked
 
 RUN mkdir -p /app/model-cache
 
 FROM ${RUNTIME_IMAGE}
-COPY --from=build --chown=65532:65532 /app/model-cache /var/cache/infergate
+COPY --from=build --chown=65532:65532 /app/model-cache /var/cache/inferno
 ENV XDG_CACHE_HOME=/var/cache
-COPY --from=build /app/target/release/infergate /usr/local/bin/infergate
+COPY --from=build /app/target/release/inferno /usr/local/bin/inferno
 USER 65532:65532
-ENTRYPOINT ["/usr/local/bin/infergate"]
+ENTRYPOINT ["/usr/local/bin/inferno"]
 CMD ["serve"]

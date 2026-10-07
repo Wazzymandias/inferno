@@ -33,7 +33,7 @@ class ModelConfigTests(unittest.TestCase):
         from vllm.v1.core.sched.async_scheduler import AsyncScheduler
         from vllm.utils.hashing import sha256_cbor
 
-        with tempfile.TemporaryDirectory(prefix="infergate-export-test-") as temp:
+        with tempfile.TemporaryDirectory(prefix="inferno-export-test-") as temp:
             directory = Path(temp)
             fixture_model(directory)
             config = VllmConfig(
@@ -85,16 +85,16 @@ class ModelConfigTests(unittest.TestCase):
             with patch("model_config.model_config", return_value=resolved) as resolve:
                 with TestClient(application) as client:
                     self.assertFalse(path.exists())
-                    url = "/v1/infergate/model-config?model=fixture"
+                    url = "/v1/inferno/model-config?model=fixture"
                     self.assertEqual(client.get(url).status_code, 401)
                     headers = {"Authorization": "Bearer test-token"}
                     for _ in range(2):
                         response = client.get(url, headers=headers)
                         self.assertEqual(response.status_code, 200)
                         self.assertEqual(response.json(), resolved)
-                    self.assertEqual(client.get("/v1/infergate/model-config?model=other", headers=headers).status_code, 404)
+                    self.assertEqual(client.get("/v1/inferno/model-config?model=other", headers=headers).status_code, 404)
                     self.assertEqual(client.post(url, headers=headers).status_code, 405)
-                    events_url = "/v1/infergate/kv-events?model=fixture"
+                    events_url = "/v1/inferno/kv-events?model=fixture"
                     self.assertEqual(client.get(events_url).status_code, 401)
                     response = client.get(events_url, headers=headers)
                     self.assertEqual(response.status_code, 200)
@@ -105,7 +105,7 @@ class ModelConfigTests(unittest.TestCase):
                     self.assertEqual(events["sources"][0]["replay_endpoint"], source.replay_endpoint)
                     self.assertEqual(events["sources"][0]["topic"], source.topic)
                     self.assertEqual(events["sources"][0]["data_parallel_rank"], 0)
-                    self.assertEqual(client.get("/v1/infergate/kv-events?model=other", headers=headers).status_code, 404)
+                    self.assertEqual(client.get("/v1/inferno/kv-events?model=other", headers=headers).status_code, 404)
                     self.assertEqual(client.post(events_url, headers=headers).status_code, 405)
                 resolve.assert_called_once_with(application.state, {"block_size":16})
                 application.state.engine_client.get_kv_event_sources.assert_called_once_with()

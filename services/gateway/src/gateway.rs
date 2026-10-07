@@ -74,7 +74,7 @@ impl Gateway {
             ));
         }
         let listener = tokio::net::TcpListener::bind(self.address).await?;
-        println!("infergate listening on {}", listener.local_addr()?);
+        println!("inferno listening on {}", listener.local_addr()?);
         let gateway = Arc::new(self);
         let shutdown = CancellationToken::new();
         tokio::try_join!(

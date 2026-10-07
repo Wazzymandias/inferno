@@ -15,14 +15,14 @@ from pathlib import Path
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
-FORMAT = "infergate-vllm-0.31.0-model-config-v1"
+FORMAT = "inferno-vllm-0.31.0-model-config-v1"
 
 
 def prefix_path(config) -> Path:
     # Native children inherit the deployment's instance_id. This is process
     # coordination only: no directory setting or shared gateway mount is needed.
     identity = hashlib.sha256(config.instance_id.encode()).hexdigest()
-    return Path(tempfile.gettempdir()) / f"infergate-prefix-{identity}.json"
+    return Path(tempfile.gettempdir()) / f"inferno-prefix-{identity}.json"
 
 
 def write_json(path: Path, value) -> None:
@@ -186,8 +186,8 @@ class ModelConfigMiddleware:
 
                 # Register inside the application so native authentication and
                 # other middleware apply to discovery exactly as to inference.
-                application.add_route("/v1/infergate/model-config", configuration, methods=["GET"])
-                application.add_route("/v1/infergate/kv-events", events, methods=["GET"])
+                application.add_route("/v1/inferno/model-config", configuration, methods=["GET"])
+                application.add_route("/v1/inferno/kv-events", events, methods=["GET"])
             await send(message)
 
         await self.app(scope, receive, publish_before_ready)

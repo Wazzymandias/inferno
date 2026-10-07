@@ -3,7 +3,7 @@
 use std::process::{Command, Output};
 
 fn command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_infergate"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_inferno"));
     for name in [
         "API_ADDRESS",
         "API_PORT",

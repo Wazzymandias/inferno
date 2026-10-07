@@ -782,7 +782,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "infergate"
+name = "inferno"
 version = "0.0.1"
 dependencies = [
  "axum",
