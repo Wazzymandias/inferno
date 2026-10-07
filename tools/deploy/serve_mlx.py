@@ -87,8 +87,8 @@ def parse_arguments(argv: list[str]) -> tuple[argparse.ArgumentParser, argparse.
 
 def stop_deployment(root: Path) -> int:
     """Stop this checkout's supervisors and native servers, retaining volumes."""
-    deployment = root / "tools/deploy"
-    pattern = re.escape(str(deployment)) + r"/([s]erve_mlx[.]py|[.]venv/bin/[v]llm serve)"
+    commands = [str(Path(__file__).resolve()), " ".join(native_command(root) + ["serve"])]
+    pattern = "|".join(re.escape(command) for command in commands)
     # Exclude this shutdown invocation and its command wrappers. Only PIDs are
     # inspected here; process arguments and environment values are not logged.
     processes = subprocess.run(["ps", "-axo", "pid=,ppid="], text=True, stdout=subprocess.PIPE, check=True)
@@ -265,15 +265,20 @@ def run_session(log_path: Path, run: Callable[[Startup], int], *, detached: bool
         return code if code >= 0 else 128 - code
 
 
-def prepare_native_environment(root: Path, startup: Startup) -> Path:
+def native_command(root: Path) -> list[str]:
+    """Use this checkout's interpreter; installed entrypoint shebangs can go stale."""
+    return [str(root / "tools/deploy/.venv/bin/python"), "-m", "vllm.entrypoints.cli.main"]
+
+
+def prepare_native_environment(root: Path, startup: Startup) -> list[str]:
     """Install and build the locked native release before starting services."""
     project = root / "tools/deploy"
     startup.progress("Preparing the native inference environment...")
     subprocess.run(["uv", "sync", "--locked", "--project", str(project)], check=True)
-    python = project / ".venv/bin/python"
+    command = native_command(root)
     startup.progress("Preparing native Metal extension (requires Apple Command Line Tools)...")
-    subprocess.run([str(python), "-c", "from vllm_metal.metal.build import build; build()"], check=True)
-    return python.with_name("vllm")
+    subprocess.run([command[0], "-c", "from vllm_metal.metal.build import build; build()"], check=True)
+    return command
 
 
 def cache_arguments(settings: dict[str, str]) -> list[str]:
@@ -389,7 +394,7 @@ def run_deployment(arguments: argparse.Namespace, root: Path, startup: Startup) 
             ) from error
     startup.progress(f"Starting native vLLM on port {port}...")
     command = [
-        str(native), "serve", model,
+        *native, "serve", model,
         "--served-model-name", model,
         "--host", "0.0.0.0", "--port", str(port),
         "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
