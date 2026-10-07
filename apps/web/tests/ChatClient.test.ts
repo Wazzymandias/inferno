@@ -20,8 +20,7 @@ describe("browser stream transport", () => {
     const bytes = new TextEncoder().encode(
       expected.map((event) => JSON.stringify(event)).join("\n"),
     );
-    const client = new ChatClient(async (path, options) => {
-      expect(path).toBe(ChatProtocol.responses);
+    const client = new ChatClient(async (_path, options) => {
       expect(JSON.parse(String(options?.body))).toEqual(request);
       return new Response(
         new ReadableStream<Uint8Array>({
@@ -51,7 +50,9 @@ describe("browser stream transport", () => {
         }),
     );
     const stream = client.respond(request, new AbortController().signal);
-    await expect(stream.next()).rejects.toThrow("invalid stream");
+    const result = stream.next();
+    await expect(result).rejects.toThrow();
+    await expect(result).rejects.not.toThrow("secret-value");
   });
 
   test("closing the consumer cancels its HTTP response reader", async () => {

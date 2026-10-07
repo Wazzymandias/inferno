@@ -11,8 +11,9 @@
 //! must be present. API defaults are left to the server.
 //!
 //! Function `strict` may be omitted, as documented in the function-calling guide.
-//! These types do not enforce
-//! model-specific constraints, numeric ranges, or cross-field requirements.
+//! Deserialization does not enforce model-specific constraints, numeric ranges,
+//! or cross-field requirements. `CreateResponseRequest::validate` checks the
+//! supported cross-field requirements separately.
 //! Fields use untyped JSON only where the reference permits arbitrary JSON.
 //! Unknown object fields are rejected so untagged unions cannot silently discard
 //! fields while choosing an overlapping variant.
@@ -21,6 +22,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value};
+
+use super::InputError;
 
 // Restrict enum fields to JSON strings and API objects to JSON maps. Serde's
 // generic data model also accepts enum maps, numeric tags, and struct arrays.
@@ -115,6 +118,8 @@ pub(crate) struct CreateResponseRequest {
     #[serde(default, deserialize_with = "object")]
     pub(crate) access_programs: Option<AccessPrograms>,
     pub(crate) background: Option<bool>,
+    /// Native vLLM cache isolation; distinct from the `OpenAI` `prompt_cache_key`.
+    pub(crate) cache_salt: Option<String>,
     #[serde(default, deserialize_with = "nullable_objects")]
     pub(crate) context_management: Option<Vec<ContextManagement>>,
     pub(crate) conversation: Option<Conversation>,
@@ -160,6 +165,25 @@ pub(crate) struct CreateResponseRequest {
     #[serde(default, deserialize_with = "nullable_string")]
     pub(crate) truncation: Option<Truncation>,
     pub(crate) user: Option<String>,
+}
+
+impl CreateResponseRequest {
+    /// Check request-wide field relationships before model-specific preparation.
+    pub(crate) fn validate(&self) -> Result<(), InputError> {
+        if self.conversation.is_some() && self.previous_response_id.is_some() {
+            return Err(InputError::new(
+                "conversation",
+                "do not combine conversation and previous_response_id",
+            ));
+        }
+        if self.stream_options.is_some() && self.stream != Some(true) {
+            return Err(InputError::new(
+                "stream_options",
+                "set stream to true when supplying stream_options",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

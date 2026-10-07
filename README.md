@@ -67,8 +67,12 @@ just deploy --model your-hf-model --port 8002
 passed after `--`. The example limits the development KV cache to 1,024 native
 blocks and lets vLLM fit the context length to its actual cache layout. Adjust
 that capacity for your model and memory budget. vLLM owns the model's chat template, message content format,
-and tokenization; the deployment command exposes `/v1/responses/render` on the
-same inference listener. Automatic tool calls use the Hermes parser.
+and tokenization policy. Gateway startup discovers the loaded tokenizer, selected
+templates, and resolved prefix-hash policy from the configured native server and
+caches them automatically. The Rust gateway prepares tokens and hashes locally
+before forwarding each create request; there is no per-request render RPC.
+`/v1/responses/render` is exposed for parity verification only.
+Automatic tool calls use the Hermes parser.
 
 For Qwen text chat, configure its native options explicitly:
 
@@ -79,11 +83,15 @@ VLLM_ARGS=--num-gpu-blocks-override 1024 --max-model-len auto --language-model-o
 
 `--language-model-only` serves text without loading the checkpoint's image
 processor. `--reasoning-parser qwen3` separates reasoning from the answer.
-Model, listener, served name, and render API availability belong to the
-launcher; its additional arguments cannot override those settings.
+Model, listener, served name, render API, and model configuration discovery belong to the
+launcher. It selects `sha256_cbor` for reproducible native/Rust hashes; additional
+arguments cannot override that algorithm or the scheduler hook.
 
 To use an already-running native vLLM server, set `INFERENCE_ENDPOINT` and
-`INFERENCE_MODEL` in `.env`, then run `docker compose up -d --wait`.
+`INFERENCE_MODEL` in `.env`. The server must enable the
+[model configuration integration](services/gateway/README.md#automatic-model-configuration).
+Set `INFERENCE_API_KEY` if that backend requires authentication.
+Then run `docker compose up -d --wait`.
 Compose manages only the application and optional telemetry services.
 
 ### Chat in the browser

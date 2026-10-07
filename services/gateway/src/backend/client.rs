@@ -2,7 +2,10 @@
 
 use std::{error::Error, time::Duration};
 
-use reqwest::{Client, Url};
+use reqwest::{
+    Client, Url,
+    header::{AUTHORIZATION, HeaderMap, HeaderValue},
+};
 
 use super::tls::install_crypto_provider;
 
@@ -18,9 +21,15 @@ impl Pool {
         }
     }
 
-    pub(crate) fn add(&mut self, endpoint: Url, timeout: Duration) -> Result<(), Box<dyn Error>> {
-        self.backends.push(Backend::new(endpoint, timeout)?);
-        Ok(())
+    pub(crate) fn add(
+        &mut self,
+        endpoint: Url,
+        timeout: Duration,
+        authorization: Option<HeaderValue>,
+    ) -> Result<&Backend, Box<dyn Error>> {
+        self.backends
+            .push(Backend::new(endpoint, timeout, authorization)?);
+        Ok(self.backends.last().expect("the backend was just added"))
     }
 
     pub(crate) fn first(&self) -> Option<&Backend> {
@@ -39,7 +48,11 @@ pub(crate) struct Backend {
 }
 
 impl Backend {
-    pub(crate) fn new(mut endpoint: Url, timeout: Duration) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn new(
+        mut endpoint: Url,
+        timeout: Duration,
+        authorization: Option<HeaderValue>,
+    ) -> Result<Self, Box<dyn Error>> {
         endpoint.set_path(&format!("{}/", endpoint.path().trim_end_matches('/')));
         install_crypto_provider();
         // Keep bundled trust roots rather than depending on the host's certificate store.
@@ -47,8 +60,13 @@ impl Backend {
             .iter()
             .map(|cert| reqwest::Certificate::from_der(cert.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
+        let mut headers = HeaderMap::new();
+        if let Some(value) = authorization {
+            headers.insert(AUTHORIZATION, value);
+        }
         Ok(Self {
             client: Client::builder()
+                .default_headers(headers)
                 .tls_certs_only(roots)
                 .timeout(timeout)
                 .redirect(reqwest::redirect::Policy::none())

@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use super::{CreateResponseError, Gateway};
-use crate::inference::{CreateResponseRequest, ModelInput};
+use super::Gateway;
+use crate::inference::{CreateResponseRequest, InputError};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -33,7 +33,7 @@ pub(super) fn app(gateway: Arc<Gateway>, body_limit: usize) -> Router {
 }
 
 async fn ready(State(gateway): State<Arc<Gateway>>) -> StatusCode {
-    let Ok(backend) = gateway.select(ModelInput::Unspecified, &gateway.pool).await else {
+    let Some(backend) = gateway.pool.first() else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
     match backend.client.get(backend.url("models", None)).send().await {
@@ -49,7 +49,7 @@ async fn forward(
     mut headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Ok(backend) = gateway.select(ModelInput::Unspecified, &gateway.pool).await else {
+    let Some(backend) = gateway.pool.first() else {
         return backend_unavailable(StatusCode::BAD_GATEWAY);
     };
     let path = uri
@@ -80,7 +80,7 @@ async fn create_response(
     uri: Uri,
     mut headers: HeaderMap,
     request: Result<Json<CreateResponseRequest>, JsonRejection>,
-) -> Result<Response, CreateResponseError> {
+) -> Result<Response, InputError> {
     let Json(request) = request?;
     strip_transport_headers(&mut headers);
     let response = gateway
@@ -89,8 +89,18 @@ async fn create_response(
     Ok(upstream_response(response))
 }
 
-impl IntoResponse for CreateResponseError {
+impl IntoResponse for InputError {
     fn into_response(self) -> Response {
+        if matches!(&self, Self::PreparationFailed(_)) {
+            // Error::source retains the typed cause. Its diagnostics may contain
+            // request data, so events use the operation's safe Display text.
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "input_preparation.failed", "message": self.to_string(),
+                })
+            );
+        }
         let status = match self {
             Self::InvalidJson(error) => {
                 let status = match &error {
@@ -99,11 +109,18 @@ impl IntoResponse for CreateResponseError {
                 };
                 return responses_error(status, "invalid_request_error", &error.body_text());
             }
-            Self::InvalidRequest(error) => {
+            Self::InvalidRequest { .. } => {
                 return responses_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_request_error",
-                    &error.to_string(),
+                    &self.to_string(),
+                );
+            }
+            Self::PreparationFailed(_) => {
+                return responses_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    &self.to_string(),
                 );
             }
             Self::NoBackend => StatusCode::SERVICE_UNAVAILABLE,

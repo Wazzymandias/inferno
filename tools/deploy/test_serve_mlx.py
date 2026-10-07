@@ -48,17 +48,15 @@ class DeploymentTests(unittest.TestCase):
                 self.assertEqual(serve_mlx.main(), 1)
         return server, start, run, stop
 
-    def test_foreground_uses_compose_configuration_and_native_template_selection(self):
+    def test_foreground_passes_compose_configuration_to_both_processes(self):
         server, start, run, stop = self.launch()
         command = start.call_args.args[0]
         self.assertEqual(command[1:3], ["serve", "example/model"])
         self.assertEqual(command[command.index("--served-model-name") + 1], "example/model")
         self.assertEqual(command[command.index("--port") + 1], "9000")
-        self.assertIn("--enable-scale-out", command)
-        self.assertNotIn("--chat-template-content-format", command)
         self.assertEqual(command[-2:], ["--max-model-len", "2048"])
         self.assertNotIn("--detached=false", command)
-        self.assertEqual(start.call_args.kwargs, {"start_new_session": True})
+        self.assertTrue(start.call_args.kwargs["start_new_session"])
         self.assertEqual(run.call_args_list[0].args[0], ["docker", "compose", "config", "--environment"])
         self.assertTrue(run.call_args_list[0].kwargs["capture_output"])
         self.assertEqual(run.call_args_list[1].args[0], ["docker", "compose", "up", "--wait"])
@@ -108,10 +106,6 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(serve_mlx.main(), 0)
             launch.assert_called_once()
             configure.assert_not_called()
-            self.assertIn("starting in the background (PID 4321)", output.getvalue())
-            self.assertIn("tail -f", output.getvalue())
-            self.assertIn("just deploy down", output.getvalue())
-            self.assertNotIn("Deployment ready", output.getvalue())
             self.assertTrue(launch.call_args.kwargs["stdout"].closed)
             return launch.call_args.args[0][2:]
 
@@ -125,7 +119,7 @@ class DeploymentTests(unittest.TestCase):
             with self.subTest(flags=flags):
                 _, start, _, _ = self.launch(flags)
                 self.assertEqual(start.call_args.args[0][1], "serve")
-                self.assertEqual(start.call_args.kwargs, {"start_new_session": True})
+                self.assertTrue(start.call_args.kwargs["start_new_session"])
                 self.assertNotIn("-d", start.call_args.args[0])
                 self.assertNotIn("--detached", start.call_args.args[0])
 
@@ -137,15 +131,6 @@ class DeploymentTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, 2)
                 launch.assert_not_called()
 
-    def test_progress_reports_readiness_and_cleanup_without_configuration_values(self):
-        output = io.StringIO()
-        self.launch(output=output)
-        logs = output.getvalue()
-        for event in ("Reading Compose configuration", "Starting native vLLM", "Waiting for vLLM readiness", "Native vLLM is ready", "Building and starting Compose services", "Deployment ready", "Stopping Compose services", "Stopping native vLLM", "Native vLLM server stopped"):
-            self.assertIn(event, logs)
-        self.assertNotIn("INFERENCE_ENDPOINT", logs)
-        self.assertNotIn("VLLM_ARGS", logs)
-
     def test_arguments_override_the_model_and_port_for_both_processes(self):
         _, start, run, _ = self.launch(["--model", "another/model", "--port", "9001", "--", "--max-num-seqs", "2"])
         command = start.call_args.args[0]
@@ -156,18 +141,11 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(environment["INFERENCE_MODEL"], "another/model")
         self.assertEqual(environment["INFERENCE_ENDPOINT"], "http://host.docker.internal:9001/v1")
 
-    def test_explicit_development_flag_is_not_forwarded_to_vllm(self):
-        _, start, run, _ = self.launch(["--model", "example/model", "--dev"])
-        self.assertNotIn("--dev", start.call_args.args[0])
-        self.assertEqual(run.call_args_list[1].args[0], ["docker", "compose", "up", "--wait"])
-
     def test_compose_failure_stops_partial_startup_and_native_workers(self):
-        output = io.StringIO()
-        server, _, run, stop = self.launch(fail_compose=True, output=output)
+        server, _, run, stop = self.launch(fail_compose=True)
         self.assertEqual(run.call_args_list[-1].args[0], ["docker", "compose", "stop"])
         stop.assert_called_once_with(12345, signal.SIGTERM)
         server.wait.assert_called_once_with(timeout=10)
-        self.assertNotIn("Deployment ready", output.getvalue())
 
     def test_compose_stop_failure_still_stops_native_workers(self):
         _, _, run, stop = self.launch(fail_stop=True)

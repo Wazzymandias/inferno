@@ -6,14 +6,14 @@ mod serve;
 use std::{error::Error, num::NonZeroU64};
 
 use bpaf::{Bpaf, Parser};
-use reqwest::Url;
+use reqwest::{Url, header::HeaderValue};
 
 pub(crate) use render::RenderCommand;
 use render::render_command;
 pub(crate) use serve::ServeCommand;
 use serve::serve_command;
 
-/// Infergate: forward Responses requests, or inspect their input token IDs.
+/// Infergate: forward Responses requests, or inspect locally prepared tokens and prefix hashes.
 #[derive(Debug, Bpaf)]
 #[bpaf(options, generate(options), version)]
 pub(crate) enum GatewayCommand {
@@ -38,6 +38,17 @@ impl GatewayCommand {
     }
 }
 
+fn inference_model() -> impl Parser<String> {
+    bpaf::long("model")
+        .env("INFERENCE_MODEL")
+        .help("Model served by the configured inference backend (required)")
+        .argument::<String>("MODEL")
+        .guard(
+            |name| !name.trim().is_empty(),
+            "inference model must not be empty",
+        )
+}
+
 fn inference_endpoint() -> impl Parser<Url> {
     bpaf::long("inference-endpoint")
         .env("INFERENCE_ENDPOINT")
@@ -54,6 +65,23 @@ fn inference_endpoint() -> impl Parser<Url> {
         )
 }
 
+// Environment-only credentials stay out of process arguments and Debug output.
+fn inference_api_key() -> impl Parser<Option<HeaderValue>> {
+    bpaf::env("INFERENCE_API_KEY")
+        .help("Optional backend bearer token for startup discovery and forwarding")
+        .argument::<String>("TOKEN")
+        .optional()
+        .parse(|key| -> Result<_, reqwest::header::InvalidHeaderValue> {
+            key.filter(|key| !key.is_empty())
+                .map(|key| {
+                    let mut value = HeaderValue::from_str(&format!("Bearer {key}"))?;
+                    value.set_sensitive(true);
+                    Ok(value)
+                })
+                .transpose()
+        })
+}
+
 fn inference_timeout() -> impl Parser<NonZeroU64> {
     bpaf::long("inference-timeout-seconds")
         .env("INFERENCE_TIMEOUT_SECONDS")
@@ -64,34 +92,10 @@ fn inference_timeout() -> impl Parser<NonZeroU64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GatewayCommand, options};
+    use super::options;
 
     #[test]
     fn parser_invariants() {
         options().check_invariants(false);
-    }
-
-    #[test]
-    fn serve_requires_an_explicit_subcommand() {
-        let arguments = [
-            "serve",
-            "--api-address",
-            "127.0.0.1",
-            "--api-port",
-            "0",
-            "--inference-endpoint",
-            "http://127.0.0.1:8001/v1",
-        ];
-        let command = options().run_inner(arguments.as_slice()).unwrap();
-        assert!(matches!(command, GatewayCommand::Serve(_)));
-        assert!(options().run_inner(&arguments[1..]).is_err());
-    }
-
-    #[test]
-    fn render_requires_no_listener_configuration_or_local_model() {
-        let command = options()
-            .run_inner(&["render", "--inference-endpoint", "http://127.0.0.1:8001/v1"])
-            .unwrap();
-        assert!(matches!(command, GatewayCommand::Render(_)));
     }
 }

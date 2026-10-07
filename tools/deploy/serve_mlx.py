@@ -111,14 +111,17 @@ def main() -> int:
     extra = configured_args + extra
     # These flags belong to this command. Overrides would disconnect the app
     # from the process or change the verification API's availability.
-    owned = {"--host", "--port", "--model", "--served-model-name", "--enable-scale-out", "--no-enable-scale-out"}
+    owned = {"--host", "--port", "--model", "--served-model-name", "--enable-scale-out", "--no-enable-scale-out", "--scheduler-cls", "--prefix-caching-hash-algo"}
     if any(option.split("=", 1)[0] in owned for option in extra):
-        parser.error("model, listener, served name, and render API are owned by this command")
+        parser.error("model, listener, served name, render API, and model configuration discovery are owned by this command")
     environment = os.environ.copy()
     # The process being launched owns Compose's model and backend connection.
     environment["INFERENCE_MODEL"] = model
     environment["INFERENCE_PORT"] = str(port)
     environment["INFERENCE_ENDPOINT"] = f"http://host.docker.internal:{port}/v1"
+    # Both native hooks are installed with the release; they publish resolved
+    # model configuration for gateway startup, without shared asset paths.
+    environment["PYTHONPATH"] = os.pathsep.join(filter(None, [str(root), environment.get("PYTHONPATH")]))
     # Never mistake another server's health endpoint for this child's startup.
     print(f"Starting native vLLM on port {port}...", flush=True)
     with socket.socket() as listener:
@@ -137,10 +140,14 @@ def main() -> int:
         "--host", "0.0.0.0", "--port", str(port),
         "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
         # Exposes /v1/responses/render on this same inference server.
-        "--enable-scale-out", *extra,
+        "--enable-scale-out",
+        "--prefix-caching-hash-algo", "sha256_cbor",
+        "--scheduler-cls", "tools.deploy.model_config.ExportingScheduler",
+        "--middleware", "tools.deploy.model_config.ModelConfigMiddleware",
+        *extra,
     ]
     # Child processes inherit stdout and stderr, keeping their output live.
-    server = subprocess.Popen(command, start_new_session=True)
+    server = subprocess.Popen(command, start_new_session=True, env=environment)
     compose_started = False
     try:
         signal.signal(signal.SIGTERM, handle_termination)

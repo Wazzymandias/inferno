@@ -11,13 +11,20 @@ use bpaf::Bpaf;
 use reqwest::Url;
 use tokio_util::sync::CancellationToken;
 
-use super::{inference_endpoint, inference_timeout};
-use crate::{backend::Pool, gateway::Gateway};
+use super::{inference_api_key, inference_endpoint, inference_model, inference_timeout};
+use crate::{
+    backend::Pool,
+    gateway::Gateway,
+    inference::{InputProcessor, ModelConfig},
+};
 
 /// Infergate: an OpenAI-compatible inference gateway. Flags override environment variables.
 #[derive(Clone, Debug, Bpaf)]
 #[bpaf(generate(serve_command))]
 pub(crate) struct ServeCommand {
+    #[bpaf(external(inference_model))]
+    model: String,
+
     /// Listener IP address (required)
     #[bpaf(long("api-address"), env("API_ADDRESS"), argument("IP"))]
     address: IpAddr,
@@ -29,6 +36,9 @@ pub(crate) struct ServeCommand {
     /// OpenAI-compatible HTTP(S) API endpoint (required)
     #[bpaf(external(inference_endpoint))]
     endpoint: Url,
+
+    #[bpaf(external(inference_api_key))]
+    api_key: Option<reqwest::header::HeaderValue>,
 
     /// Whole backend response deadline, including streaming
     #[bpaf(external(inference_timeout))]
@@ -56,8 +66,14 @@ pub(crate) struct ServeCommand {
 impl ServeCommand {
     pub(crate) async fn execute(self) -> Result<(), Box<dyn Error>> {
         let mut pool = Pool::new();
-        pool.add(self.endpoint, Duration::from_secs(self.timeout.get()))?;
-        Gateway::new(self.address, self.port)
+        let backend = pool.add(
+            self.endpoint,
+            Duration::from_secs(self.timeout.get()),
+            self.api_key,
+        )?;
+        let config = ModelConfig::discover(backend, &self.model).await?;
+        let processor = InputProcessor::load(config)?;
+        Gateway::new(self.address, self.port, processor)
             .with_pool(pool)
             .with_limits(
                 self.body_limit.get(),

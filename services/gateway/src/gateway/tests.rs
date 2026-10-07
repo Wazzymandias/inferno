@@ -69,6 +69,7 @@ async fn https_verifies_certificates_and_hostnames_with_tls12_and_tls13() {
     let backend = Backend::new(
         Url::parse("https://localhost/v1").unwrap(),
         Duration::from_secs(5),
+        None,
     )
     .unwrap();
     let ca = reqwest::Certificate::from_der(include_bytes!("../testdata/ca.der")).unwrap();
@@ -132,10 +133,11 @@ async fn preserves_backend_prefix_query_body_and_error_response() {
     pool.add(
         Url::parse(&format!("{upstream}/engines/v1")).unwrap(),
         Duration::from_secs(5),
+        Some("Bearer default-credential".parse().unwrap()),
     )
     .unwrap();
     let (gateway, api_task) = serve(app(
-        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0).with_pool(pool)),
+        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0, processor()).with_pool(pool)),
         1024,
     ))
     .await;
@@ -184,10 +186,11 @@ async fn streams_first_event_before_backend_finishes() {
     pool.add(
         Url::parse(&format!("{upstream}/v1")).unwrap(),
         Duration::from_secs(5),
+        None,
     )
     .unwrap();
     let (gateway, api_task) = serve(app(
-        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0).with_pool(pool)),
+        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0, processor()).with_pool(pool)),
         1024,
     ))
     .await;
@@ -242,10 +245,11 @@ async fn times_out_an_unfinished_backend_stream() {
     pool.add(
         Url::parse(&format!("{upstream}/v1")).unwrap(),
         Duration::from_secs(1),
+        None,
     )
     .unwrap();
     let (gateway, api_task) = serve(app(
-        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0).with_pool(pool)),
+        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0, processor()).with_pool(pool)),
         1024,
     ))
     .await;
@@ -275,10 +279,11 @@ async fn distinguishes_liveness_backend_failure_and_oversized_request() {
     pool.add(
         Url::parse(&format!("http://{address}/v1")).unwrap(),
         Duration::from_secs(1),
+        None,
     )
     .unwrap();
     let (gateway, task) = serve(app(
-        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0).with_pool(pool)),
+        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0, processor()).with_pool(pool)),
         4,
     ))
     .await;
@@ -344,9 +349,9 @@ async fn shutdown_deadline_bounds_an_active_request() {
     let address = listener.local_addr().unwrap();
     let (upstream, mock_task) = serve(router).await;
     let mut pool = Pool::new();
-    pool.add(Url::parse(&upstream).unwrap(), Duration::from_secs(5))
+    pool.add(Url::parse(&upstream).unwrap(), Duration::from_secs(5), None)
         .unwrap();
-    let mut gateway = Gateway::new(address.ip(), address.port()).with_pool(pool);
+    let mut gateway = Gateway::new(address.ip(), address.port(), processor()).with_pool(pool);
     gateway.shutdown_timeout = Duration::from_millis(50);
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(Arc::new(gateway).serve_http(listener, shutdown.clone()));
@@ -370,7 +375,7 @@ async fn shutdown_deadline_bounds_an_active_request() {
 async fn idle_server_shuts_down_cleanly() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let mut gateway = Gateway::new(address.ip(), address.port());
+    let mut gateway = Gateway::new(address.ip(), address.port(), processor());
     gateway.shutdown_timeout = Duration::from_secs(1);
     let shutdown = CancellationToken::new();
     shutdown.cancel();
@@ -381,4 +386,106 @@ async fn idle_server_shuts_down_cleanly() {
     .await
     .unwrap()
     .unwrap();
+}
+
+fn processor() -> crate::inference::InputProcessor {
+    crate::inference::InputProcessor::load(
+        crate::inference::ModelConfig::parse(
+            include_bytes!("../testdata/input-string/model-config.json"),
+            "fixture",
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let mock = Router::new().fallback(any(move |uri: Uri, body: Bytes| {
+        let observed = Arc::clone(&observed);
+        async move {
+            assert_eq!(
+                uri.path(),
+                "/v1/responses",
+                "preparation must not make render calls"
+            );
+            observed.fetch_add(1, Ordering::SeqCst);
+            ([("content-type", "application/json")], body)
+        }
+    }));
+    let (upstream, mock_task) = serve(mock).await;
+    let mut pool = Pool::new();
+    pool.add(
+        Url::parse(&format!("{upstream}/v1")).unwrap(),
+        Duration::from_secs(5),
+        None,
+    )
+    .unwrap();
+    let (gateway, task) = serve(app(
+        Arc::new(Gateway::new("127.0.0.1".parse().unwrap(), 0, processor()).with_pool(pool)),
+        4096,
+    ))
+    .await;
+    let request = serde_json::json!({"model":"fixture", "input":"Keep the original", "instructions":"System", "stream":true});
+    let response = Client::new()
+        .post(format!("{gateway}/v1/responses"))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json::<serde_json::Value>().await.unwrap(), request);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let invalid = Client::new()
+        .post(format!("{gateway}/v1/responses"))
+        .json(&serde_json::json!({"model":"other", "input":"private"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert!(!invalid.text().await.unwrap().contains("private"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    task.abort();
+    mock_task.abort();
+}
+
+#[tokio::test]
+async fn task_failure_preserves_its_typed_cause_in_the_input_error() {
+    use crate::inference::InputError;
+    use axum::response::IntoResponse;
+    use std::error::Error;
+    let task = tokio::spawn(std::future::pending::<()>());
+    task.abort();
+    let error = InputError::from(task.await.unwrap_err());
+    let cause = error
+        .source()
+        .unwrap()
+        .downcast_ref::<tokio::task::JoinError>()
+        .unwrap();
+    assert!(cause.is_cancelled());
+    let error = InputError::PreparationFailed(Box::new(std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "private request data",
+    )));
+    assert_eq!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    assert!(!format!("{error:?}").contains("private request data"));
+    assert!(!error.to_string().contains("private request data"));
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["type"], "server_error");
 }

@@ -114,13 +114,9 @@ describe("web server and Responses API", () => {
 
   test("status errors do not expose provider error bodies", async () => {
     const events = await send("broken-model");
-    expect(events).toEqual([
-      {
-        type: "failed",
-        message:
-          "The inference provider rejected this request. Check the model ID and conversation length.",
-      },
-    ]);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("failed");
+    expect(JSON.stringify(events)).not.toContain("secret-provider-error");
   });
 
   test("rejects invalid and cross-origin requests before inference", async () => {

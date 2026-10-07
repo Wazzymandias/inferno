@@ -1,34 +1,11 @@
 //! Responses API request processing and backend dispatch.
 
-use std::io;
+use std::sync::Arc;
 
-use axum::{extract::rejection::JsonRejection, http::HeaderMap};
+use axum::http::HeaderMap;
 
-use super::{Gateway, SelectionError};
-use crate::inference::{CreateResponseRequest, ModelInput};
-
-#[derive(Debug)]
-pub(super) enum CreateResponseError {
-    InvalidJson(JsonRejection),
-    InvalidRequest(io::Error),
-    NoBackend,
-    Backend(reqwest::Error),
-}
-
-impl From<JsonRejection> for CreateResponseError {
-    fn from(error: JsonRejection) -> Self {
-        Self::InvalidJson(error)
-    }
-}
-
-impl From<SelectionError> for CreateResponseError {
-    fn from(error: SelectionError) -> Self {
-        match error {
-            SelectionError::InvalidRequest(error) => Self::InvalidRequest(error),
-            SelectionError::NoBackend => Self::NoBackend,
-        }
-    }
-}
+use super::Gateway;
+use crate::inference::{CreateResponseRequest, InputError, ModelInput};
 
 impl Gateway {
     pub(super) async fn create_response(
@@ -36,17 +13,31 @@ impl Gateway {
         query: Option<&str>,
         headers: HeaderMap,
         request: CreateResponseRequest,
-    ) -> Result<reqwest::Response, CreateResponseError> {
-        let input = ModelInput::from(&request);
-        let backend = self.select(input, &self.pool).await?;
+    ) -> Result<reqwest::Response, InputError> {
+        let (request, input) = self.prepare_input(request).await?;
+        let backend = self.select(&input).ok_or(InputError::NoBackend)?;
 
-        backend
+        Ok(backend
             .client
             .post(backend.url("responses", query))
             .headers(headers)
             .json(&request)
             .send()
-            .await
-            .map_err(CreateResponseError::Backend)
+            .await?)
+    }
+
+    /// Run CPU preparation outside the async executor, moving the request
+    /// through the worker and returning it intact for backend dispatch.
+    /// The worker owns its captures because it can outlive a cancelled handler.
+    async fn prepare_input(
+        &self,
+        request: CreateResponseRequest,
+    ) -> Result<(CreateResponseRequest, ModelInput), InputError> {
+        let processor = Arc::clone(&self.processor);
+        tokio::task::spawn_blocking(move || {
+            let input = processor.prepare(&request)?;
+            Ok((request, input))
+        })
+        .await?
     }
 }
