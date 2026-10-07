@@ -12,3 +12,4 @@ FROM ${RUNTIME_IMAGE}
 COPY --from=build /app/target/release/infergate /usr/local/bin/infergate
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/infergate"]
+CMD ["serve"]

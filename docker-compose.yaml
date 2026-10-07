@@ -4,7 +4,6 @@ include:
 
 services:
   web:
-    container_name: web
     pull_policy: build
     build:
       context: ./apps/web
@@ -56,15 +55,3 @@ services:
       INFERENCE_TIMEOUT_SECONDS: ${INFERENCE_TIMEOUT_SECONDS:-300}
       MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-1048576}
       SHUTDOWN_TIMEOUT_SECONDS: ${SHUTDOWN_TIMEOUT_SECONDS:-5}
-    depends_on:
-      local-model:
-        condition: service_started
-        required: false
-
-  # Only local deployments should download and configure model weights.
-  local-model:
-    profiles: [local]
-    provider:
-      type: model
-      options:
-        model: ${INFERENCE_MODEL:-}

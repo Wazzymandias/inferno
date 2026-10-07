@@ -13,8 +13,8 @@ Open `http://localhost:3000`. Replace the example URL and model with your servic
 API base URL and accepted model ID. The endpoint must include its prefix, such
 as `/v1`; the SDK appends `/models` and `/responses`. The model field offers
 discovered IDs and accepts custom IDs. Discovery failure does not disable chat.
-For this repository's local backend, use the root `.env`'s `INFERENCE_MODEL`:
-its discovered model ID may differ from the ID accepted for inference.
+The root `just deploy` command starts native vLLM, the gateway, and this app.
+It configures the same served model ID for inference and the chat default.
 
 Type a message and press Enter to send, or Shift + Enter for another line.
 Replies stream as they arrive and render Markdown, including code and tables.
@@ -87,8 +87,8 @@ bun --bun playwright install chromium
 bun run test:browser
 ```
 
-From the repository root, `docker compose up -d --build` builds and
-runs `web` alongside the gateway. The service and container are both named `web`.
+From the repository root, `just deploy` starts native inference and builds and
+runs the `web` and gateway Compose services. Compose owns container names.
 Its health check verifies the configured web listener's `/healthz` endpoint.
 The container uses the locked dependencies and
 the declared `BUN_IMAGE`, runs as the Bun user, and accepts the same environment
