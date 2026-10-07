@@ -1,41 +1,7 @@
-# Start detached by default (-d, --detached); --detached=false attaches.
+# Deployment commands and native process ownership live in the launcher.
 [positional-arguments]
 deploy *args:
-    #!/bin/sh
-    while [ "${1-}" = --dev ]; do shift; done
-    if [ "${1-}" = down ]; then
-        shift
-        for option in "$@"; do
-            if [ "$option" != --dev ]; then
-                printf '%s\n' 'Usage: just deploy down [--dev]' >&2
-                exit 2
-            fi
-        done
-        printf '%s\n' 'Stopping the project deployment and vLLM servers...'
-        # Brackets exclude this command itself; status 1 means no server is running.
-        if pkill -TERM -f '{{source_directory()}}/([s]erve_mlx[.]py|[.]venv/bin/[v]llm serve)'; then
-            printf '%s\n' 'Requested deployment and vLLM shutdown.'
-        else
-            stop_status=$?
-            if [ "$stop_status" -ne 1 ]; then
-                printf '%s\n' 'Could not request deployment shutdown.' >&2
-                exit "$stop_status"
-            fi
-            printf '%s\n' 'No running deployment or vLLM servers found for this project.'
-        fi
-        printf '%s\n' 'Stopping and removing the Compose stack...'
-        # Inherit stdout and stderr so Docker streams its progress and errors.
-        if docker compose down; then
-            printf '%s\n' 'Compose shutdown complete. Persistent volumes were retained.'
-        else
-            compose_status=$?
-            printf '%s\n' 'Compose shutdown failed; see Docker output above.' >&2
-            exit "$compose_status"
-        fi
-        exit 0
-    fi
-    printf '%s\n' 'Preparing the development environment...'
-    exec uv run --locked --project '{{source_directory()}}' '{{source_directory()}}/serve_mlx.py' "$@"
+    uv run --no-project --python 3.12 '{{source_directory()}}/serve_mlx.py' "$@"
 
 # Check native deployment configuration and process cleanup.
 deploy-test:

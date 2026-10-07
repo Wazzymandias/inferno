@@ -80,12 +80,32 @@ server failures write events to stdout without request bodies, service URLs, or
 credentials. Model discovery has a ten-second request timeout because it is
 optional; generation uses the SDK's timeout and the inference service's limits.
 
-To run the browser checks against a real local HTTP test backend:
+From the repository root, run the complete web check:
 
 ```bash
-bun --bun playwright install chromium
-bun run test:browser
+just web test
 ```
+
+This installs locked dependencies and Chromium, checks TypeScript, runs the unit
+tests, builds production assets, and runs Playwright. Each UI test owns its HTTP
+fixture and web server. A separate browser test uses the configured native model
+through the deployed web app and gateway: it checks a correct completed answer,
+conversation context, and a longer complete reply. Failure, truncation, and
+browser errors fail the test; model responses are not mocked in this check.
+
+Playwright's [web server lifecycle](https://playwright.dev/docs/test-webserver)
+derives the web address from Compose and uses the root `.env` model
+configuration. It reuses an already running local deployment. Otherwise it owns
+`just deploy up --detached=false` and shuts down that session after the tests,
+retaining containers and volumes. CI requires a fresh deployment. Native startup
+has a fifteen-minute budget for builds and model loading; each expected answer
+has a sixty-second wait within a three-minute conversation test.
+
+The complete check needs the native deployment prerequisites listed in the root
+README. `bun run test` runs the application tests without native inference.
+`bun run test:browser` runs the browser suite. Failed browser tests retain traces,
+screenshots, and an HTML report in `test-results/` and `playwright-report/`;
+open the report with `bun --bun playwright show-report`.
 
 From the repository root, `just deploy` starts native inference and builds and
 runs the `web` and gateway Compose services. Compose owns container names.

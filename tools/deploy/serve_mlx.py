@@ -1,9 +1,13 @@
 """Start native vLLM Metal and the Compose app as one development session."""
 
 import argparse
+from collections.abc import Callable
+import io
 import os
 from pathlib import Path
 import platform
+import re
+import select
 import shlex
 import shutil
 import signal
@@ -11,6 +15,8 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
+from typing import BinaryIO, TextIO
 import urllib.error
 import urllib.request
 
@@ -49,53 +55,248 @@ def handle_termination(*_) -> None:
     raise KeyboardInterrupt
 
 
-def build_metal_extension() -> None:
-    """Build the pinned source dependency before starting any services.
+def parse_arguments(argv: list[str]) -> tuple[argparse.ArgumentParser, argparse.Namespace]:
+    """Own deployment commands; native options require an explicit boundary."""
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True)
+    up = commands.add_parser(
+        "up", help="prepare and start native inference and Compose", allow_abbrev=False,
+        epilog="Pass native vLLM options after --, for example: up -- --max-num-seqs 2",
+    )
+    up.add_argument("--dev", action="store_true", default=True, help="use the development deployment (default)")
+    up.add_argument("-d", "--detached", type=boolean, nargs="?", const=True, default=True, metavar="true|false", help="return once ready, leaving services in the background (default: true)")
+    up.add_argument("--model", help="override INFERENCE_MODEL from the root .env")
+    up.add_argument("--port", type=port_number, help="override INFERENCE_PORT from the root .env")
+    down = commands.add_parser("down", help="stop native inference and remove Compose containers, retaining volumes", allow_abbrev=False)
+    down.add_argument("--dev", action="store_true", help=argparse.SUPPRESS)
+    options = list(argv)
+    # Preserve the existing optional --dev prefix and implicit startup command.
+    while options[:1] == ["--dev"]:
+        options.pop(0)
+    if not options or (options[0].startswith("-") and options[0] not in ("-h", "--help")):
+        options.insert(0, "up")
+    boundary = options.index("--") if "--" in options else len(options)
+    native = options[boundary + 1:]
+    arguments = parser.parse_args(options[:boundary])
+    if arguments.command != "up" and boundary != len(options):
+        parser.error("native vLLM options are only accepted by up, after --")
+    arguments.vllm_args = native
+    return parser, arguments
 
-    Upstream reuses the extension when its sources and dependencies match.
-    MLX compiles the shaders separately during the native worker's warm-up.
+
+def stop_deployment(root: Path) -> int:
+    """Stop this checkout's supervisors and native servers, retaining volumes."""
+    deployment = root / "tools/deploy"
+    pattern = re.escape(str(deployment)) + r"/([s]erve_mlx[.]py|[.]venv/bin/[v]llm serve)"
+    # Exclude this shutdown invocation and its command wrappers. Only PIDs are
+    # inspected here; process arguments and environment values are not logged.
+    processes = subprocess.run(["ps", "-axo", "pid=,ppid="], text=True, stdout=subprocess.PIPE, check=True)
+    parents = dict(tuple(map(int, line.split())) for line in processes.stdout.splitlines())
+    excluded = {os.getpid()}
+    parent = parents.get(os.getpid(), 0)
+    while parent and parent not in excluded:
+        excluded.add(parent)
+        parent = parents.get(parent, 0)
+    print("Stopping the project deployment and vLLM servers...", flush=True)
+    matches = subprocess.run(["pgrep", "-f", pattern], text=True, stdout=subprocess.PIPE)
+    if matches.returncode not in (0, 1):
+        matches.check_returncode()
+    pids = {int(value) for value in matches.stdout.split()} - excluded
+    # The supervisor owns its children and Compose cleanup. Signal only the
+    # outermost matching processes, then wait before removing their containers.
+    for pid in sorted(pids):
+        if parents.get(pid) in pids:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    while pids:
+        remaining = subprocess.run(
+            ["ps", "-p", ",".join(map(str, sorted(pids))), "-o", "pid=,stat="],
+            text=True, stdout=subprocess.PIPE,
+        )
+        if remaining.returncode not in (0, 1):
+            remaining.check_returncode()
+        pids = {
+            int(pid) for pid, state in (line.split() for line in remaining.stdout.splitlines())
+            if not state.startswith("Z")
+        }
+        if pids:
+            time.sleep(0.25)
+    print("Stopping and removing the Compose stack...", flush=True)
+    subprocess.run(["docker", "compose", "down"], cwd=root, check=True)
+    print("Compose shutdown complete. Persistent volumes were retained.", flush=True)
+    return 0
+
+
+class Startup:
+    """Write progress to stdout; acknowledge readiness independently of logs."""
+
+    def __init__(self, connection: TextIO | None = None):
+        self.connection = connection
+
+    def progress(self, message: str) -> None:
+        print(message, flush=True)
+
+    def ready(self) -> None:
+        self.progress("Deployment ready. Use just deploy down to stop and remove containers.")
+        if self.connection is not None:
+            self.connection.write("ready\n")
+            self.connection.flush()
+
+
+class LogStream:
+    """Mirror new bytes from the writer's open log, without reopening its path.
+
+    An independent read offset avoids moving the append writer's position.
+    Copy bytes unchanged so partial lines, UTF-8, and carriage returns survive.
     """
-    from vllm_metal.metal.build import build
 
-    print("Preparing native Metal extension (requires Apple Command Line Tools)...", flush=True)
-    build()
+    def __init__(self, log: BinaryIO, output: BinaryIO):
+        self.log = log
+        self.output = output
+        self.offset = os.fstat(log.fileno()).st_size
+
+    def copy_pending(self) -> None:
+        # Snapshot the end so continuous output cannot starve readiness checks.
+        end = os.fstat(self.log.fileno()).st_size
+        while self.offset < end:
+            chunk = os.pread(self.log.fileno(), min(io.DEFAULT_BUFFER_SIZE, end - self.offset), self.offset)
+            if not chunk:
+                break
+            self.output.write(chunk)
+            self.offset += len(chunk)
+        self.output.flush()
+
+
+def follow_session(connection: TextIO, logs: LogStream, *, detached: bool) -> bool:
+    """Stream until readiness in detached mode, or command completion otherwise."""
+    ready = False
+    while True:
+        # Regular files have no blocking tail read. Poll new bytes every 100 ms;
+        # the separate pipe wakes us immediately on readiness or process exit.
+        readable, _, _ = select.select([connection], [], [], 0.1)
+        logs.copy_pending()
+        if readable:
+            event = connection.readline()
+            if not event:
+                return ready
+            if event != "ready\n":
+                raise RuntimeError("invalid deployment readiness acknowledgement")
+            ready = True
+            # Readiness may arrive after the preceding log snapshot. Flush its
+            # output before returning to the caller.
+            logs.copy_pending()
+            if detached:
+                return ready
+
+
+def run_session(log_path: Path, run: Callable[[Startup], int], *, detached: bool) -> int:
+    """Own log persistence, terminal streaming, and the command's process lifetime.
+
+    Services always write to the log, so detaching its reader cannot break their
+    stdout. Foreground commands keep streaming through exit and cleanup. Detached
+    startup returns only after the supervisor acknowledges readiness.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    with log_path.open("a+b", buffering=0) as log:
+        logs = LogStream(log, sys.stdout.buffer)
+        read_fd, write_fd = os.pipe()
+        try:
+            pid = os.fork()
+        except BaseException:
+            os.close(read_fd)
+            os.close(write_fd)
+            raise
+        if pid == 0:
+            status = 1
+            try:
+                os.close(read_fd)
+                os.setsid()
+                with open(os.devnull) as null:
+                    os.dup2(null.fileno(), 0)
+                os.dup2(log.fileno(), 1)
+                os.dup2(log.fileno(), 2)
+                # Launcher prints should be as live as child-process output.
+                sys.stdout.reconfigure(line_buffering=True, write_through=True)
+                sys.stderr.reconfigure(line_buffering=True, write_through=True)
+                with os.fdopen(write_fd, "w") as connection:
+                    startup = Startup(connection)
+                    status = command_status(lambda: run(startup), startup.progress)
+            except BaseException:
+                traceback.print_exc()
+            finally:
+                # Never unwind into the invoking process's control flow.
+                os._exit(status)
+        os.close(write_fd)
+        with os.fdopen(read_fd) as connection:
+            try:
+                print(f"Deployment process: {pid}. Log: {shlex.quote(str(log_path))}", flush=True)
+                ready = follow_session(connection, logs, detached=detached)
+                if detached and ready:
+                    return 0
+            except BaseException as error:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    if isinstance(error, KeyboardInterrupt):
+                        # Keep showing cleanup output while cancellation finishes.
+                        follow_session(connection, logs, detached=False)
+                finally:
+                    os.waitpid(pid, 0)
+                if isinstance(error, KeyboardInterrupt):
+                    # The supervisor already logged the interruption; preserve
+                    # its cancellation status without printing it a second time.
+                    logs.copy_pending()
+                    return 130
+                raise
+        _, status = os.waitpid(pid, 0)
+        logs.copy_pending()
+        code = os.waitstatus_to_exitcode(status)
+        if detached and not ready:
+            print(f"Deployment did not become ready. See {shlex.quote(str(log_path))}.", flush=True)
+            if code == 0:
+                return 1
+        return code if code >= 0 else 128 - code
+
+
+def prepare_native_environment(root: Path, startup: Startup) -> Path:
+    """Install and build the locked native release before starting services."""
+    project = root / "tools/deploy"
+    startup.progress("Preparing the native inference environment...")
+    subprocess.run(["uv", "sync", "--locked", "--project", str(project)], check=True)
+    python = project / ".venv/bin/python"
+    startup.progress("Preparing native Metal extension (requires Apple Command Line Tools)...")
+    subprocess.run([str(python), "-c", "from vllm_metal.metal.build import build; build()"], check=True)
+    return python.with_name("vllm")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dev", action="store_true", default=True, help="use the development deployment (default: true)")
-    parser.add_argument("-d", "--detached", type=boolean, nargs="?", const=True, default=True, metavar="true|false", help="run in the background (default: true); use --detached=false for live terminal output")
-    parser.add_argument("--model", help="override INFERENCE_MODEL from the root .env")
-    parser.add_argument("--port", type=port_number, help="override INFERENCE_PORT from the root .env")
-    parser.add_argument("vllm_args", nargs=argparse.REMAINDER, help="extra native vLLM options after --")
-    arguments = parser.parse_args()
+    parser, arguments = parse_arguments(sys.argv[1:])
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         parser.error("vLLM Metal requires an Apple Silicon Mac")
-    root = Path(__file__).resolve().parents[2]
-    if arguments.detached:
-        log_path = root / "tools/deploy/deploy.log"
-        # The parser owns the boundary between deployment and native options.
-        # Override detached mode after the caller's flags, before native options,
-        # so an explicit -d cannot make the child detach recursively.
-        launcher_arguments = sys.argv[1:len(sys.argv) - len(arguments.vllm_args)]
-        # A new session survives terminal closure. The same interpreter and
-        # arguments run the existing lifecycle, with both output streams logged.
-        with log_path.open("a") as log:
-            deployment = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), *launcher_arguments, "--detached=false", *arguments.vllm_args],
-                cwd=root, stdin=subprocess.DEVNULL, stdout=log,
-                stderr=subprocess.STDOUT, start_new_session=True,
-            )
-        print(f"Deployment is starting in the background (PID {deployment.pid}).", flush=True)
-        print(f"Follow startup progress and live logs: tail -f {shlex.quote(str(log_path))}", flush=True)
-        print("Use just deploy down to stop it.", flush=True)
-        return 0
+    launcher = Path(__file__).resolve()
+    root = launcher.parents[2]
+    signal.signal(signal.SIGTERM, handle_termination)
+    # Resolve the destination once. Streaming consumes this writer's open file,
+    # and every command uses the same output lifecycle.
+    log_path = launcher.with_name("deploy.log")
+    if arguments.command == "down":
+        return run_session(log_path, lambda _: stop_deployment(root), detached=False)
+    return run_session(log_path, lambda startup: run_deployment(arguments, root, startup), detached=arguments.detached)
+
+
+def run_deployment(arguments: argparse.Namespace, root: Path, startup: Startup) -> int:
     if not root.joinpath(".env").exists():
-        print("Creating .env from .env.example...", flush=True)
+        startup.progress("Creating .env from .env.example...")
         shutil.copyfile(root / ".env.example", root / ".env")
     # Compose owns .env loading, interpolation, and shell overrides. Capture its
     # configuration without logging it: it can contain service credentials.
-    print("Reading Compose configuration...", flush=True)
+    startup.progress("Reading Compose configuration...")
     try:
         configured = subprocess.run(
             ["docker", "compose", "config", "--environment"],
@@ -111,21 +312,18 @@ def main() -> int:
     )
     model = arguments.model if arguments.model is not None else settings.get("INFERENCE_MODEL", "")
     if not model.strip():
-        parser.error("set INFERENCE_MODEL in .env or supply --model")
+        raise RuntimeError("set INFERENCE_MODEL in .env or supply --model")
     try:
         port = arguments.port if arguments.port is not None else port_number(settings.get("INFERENCE_PORT", ""))
         configured_args = shlex.split(settings.get("VLLM_ARGS", ""))
     except (argparse.ArgumentTypeError, ValueError):
-        parser.error("set a valid INFERENCE_PORT and shell-quoted VLLM_ARGS in .env")
-    extra = arguments.vllm_args
-    if extra[:1] == ["--"]:
-        extra = extra[1:]
-    extra = configured_args + extra
+        raise RuntimeError("set a valid INFERENCE_PORT and shell-quoted VLLM_ARGS in .env")
+    extra = configured_args + arguments.vllm_args
     # These flags belong to this command. Overrides would disconnect the app
     # from the process or change the verification API's availability.
     owned = {"--host", "--port", "--model", "--served-model-name", "--enable-scale-out", "--no-enable-scale-out", "--scheduler-cls", "--prefix-caching-hash-algo"}
     if any(option.split("=", 1)[0] in owned for option in extra):
-        parser.error("model, listener, served name, render API, and model configuration discovery are owned by this command")
+        raise RuntimeError("model, listener, served name, render API, and model configuration discovery are owned by this command")
     environment = os.environ.copy()
     # The process being launched owns Compose's model and backend connection.
     environment["INFERENCE_MODEL"] = model
@@ -138,9 +336,7 @@ def main() -> int:
     # This selects upstream's MLX shader compilation during worker warm-up;
     # the C++ extension is built below, before the server starts.
     environment["VLLM_METAL_BUILD_FROM_SOURCE"] = "1"
-    # SIGTERM must also interrupt and clean up the compiler during preparation.
-    signal.signal(signal.SIGTERM, handle_termination)
-    build_metal_extension()
+    native = prepare_native_environment(root, startup)
     # Never mistake another server's health endpoint for this child's startup.
     with socket.socket() as listener:
         # Match vLLM's listener so recently closed connections allow a restart.
@@ -152,9 +348,9 @@ def main() -> int:
                 f"Cannot use native vLLM port {port}: {error.strerror}. "
                 "Stop its current server or choose another --port."
             ) from error
-    print(f"Starting native vLLM on port {port}...", flush=True)
+    startup.progress(f"Starting native vLLM on port {port}...")
     command = [
-        str(Path(sys.executable).with_name("vllm")), "serve", model,
+        str(native), "serve", model,
         "--served-model-name", model,
         "--host", "0.0.0.0", "--port", str(port),
         "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
@@ -169,17 +365,17 @@ def main() -> int:
     server = subprocess.Popen(command, start_new_session=True, env=environment)
     compose_started = False
     try:
-        print("Waiting for vLLM readiness. Model loading may take several minutes...", flush=True)
+        startup.progress("Waiting for native model readiness. Containers start after the model is ready; loading may take several minutes...")
         wait_until_ready(server, port)
-        print("Native vLLM is ready.", flush=True)
+        startup.progress("Native vLLM is ready.")
         # Include partial startup failures in cleanup; volumes are preserved.
         compose_started = True
-        print("Building and starting Compose services...", flush=True)
+        startup.progress("Building and starting Compose services...")
         subprocess.run(
             ["docker", "compose", "up", "--wait"],
             cwd=root, env=environment, check=True,
         )
-        print("Deployment ready. Use just deploy down to stop and remove containers.", flush=True)
+        startup.ready()
         status = server.wait()
         print(f"vLLM exited (status {status}). Stopping the deployment...", flush=True)
         return status
@@ -209,20 +405,23 @@ def main() -> int:
             print("Native vLLM server stopped.", flush=True)
 
 
-if __name__ == "__main__":
+def command_status(run: Callable[[], int], report: Callable[[str], None] = print) -> int:
+    """Preserve command failures for both foreground and detached startup."""
     try:
-        raise SystemExit(main())
+        return run()
     except KeyboardInterrupt:
-        print("Deployment interrupted.", flush=True)
-        raise SystemExit(130)
+        report("Deployment interrupted.")
+        return 130
     except subprocess.CalledProcessError as error:
-        print(f"Docker Compose failed (exit status {error.returncode}); see its output above.", flush=True)
-        raise SystemExit(1)
+        report(f"Deployment command failed (exit status {error.returncode}); see its output in the deployment log or terminal.")
+        return error.returncode if error.returncode > 0 else 128 - error.returncode
     except OSError as error:
-        # Only the OS reason is safe to print; filenames may contain private data.
-        print(f"Deployment failed: {error.strerror}.", flush=True)
-        raise SystemExit(1)
+        report(f"Deployment failed: {error.strerror}.")
+        return 1
     except RuntimeError as error:
-        # These messages contain context from the owning deployment step only.
-        print(f"Deployment failed: {error}", flush=True)
-        raise SystemExit(1)
+        report(f"Deployment failed: {error}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(command_status(main))

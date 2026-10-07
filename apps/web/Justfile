@@ -1,0 +1,7 @@
+# Verify types, application behavior, and browser interactions with native inference.
+test:
+    bun install --frozen-lockfile
+    bun run check
+    bun run test
+    bun --bun playwright install chromium
+    bun run test:browser

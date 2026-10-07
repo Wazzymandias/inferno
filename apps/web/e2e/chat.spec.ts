@@ -1,33 +1,11 @@
-import { expect, test } from "@playwright/test";
-import { RuntimeConfig } from "../src/server/RuntimeConfig";
-import { WebApplication } from "../src/server/WebApplication";
-import { InferenceFixture } from "../tests/InferenceFixture";
-
-let inference: InferenceFixture;
-let web: Awaited<ReturnType<WebApplication["start"]>>;
-
-test.beforeEach(async () => {
-  inference = new InferenceFixture();
-  const config = RuntimeConfig.parse([], {
-    NODE_ENV: "production",
-    INFERENCE_ENDPOINT: inference.endpoint,
-    INFERENCE_MODEL: "test-model",
-    INFERENCE_API_KEY: "server-test-secret",
-    WEB_HOST: "127.0.0.1",
-    WEB_PORT: "0",
-  });
-  if (config === "help") throw new Error("Expected runtime configuration");
-  web = await new WebApplication(config).start();
-});
-
-test.afterEach(async () => {
-  await web?.stop(true);
-  await inference?.stop();
-});
+import { expect } from "@playwright/test";
+import { test } from "./fixtures";
 
 test("streams a chat, remembers context, renders markdown, copies, and starts fresh", async ({
   page,
   context,
+  inference,
+  web,
 }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -67,6 +45,8 @@ test("streams a chat, remembers context, renders markdown, copies, and starts fr
 
 test("stops an in-flight response and retries without adding another user turn", async ({
   page,
+  inference,
+  web,
 }) => {
   inference.behavior = "slow";
   await page.goto(web.url.href);
@@ -88,6 +68,8 @@ test("stops an in-flight response and retries without adding another user turn",
 
 test("shows inference errors and allows custom model IDs when discovery is unavailable", async ({
   page,
+  inference,
+  web,
 }) => {
   inference.discovery = "unavailable";
   await page.goto(web.url.href);
@@ -109,6 +91,8 @@ test("shows inference errors and allows custom model IDs when discovery is unava
 
 test("mobile layout supports keyboard composition without horizontal overflow", async ({
   page,
+  inference,
+  web,
 }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto(web.url.href);

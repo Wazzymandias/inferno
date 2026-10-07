@@ -21,11 +21,14 @@ Native service development additionally uses [Bun](https://bun.sh/get),
 ## Quickstart
 
 ```sh
-just deploy
+just deploy up
 ```
 
-`--dev` is optional and defaults to true; `just deploy --dev` runs the same
-development stack. Use `just deploy down` or `just deploy down --dev` to stop it.
+`just deploy` remains shorthand for `just deploy up`. The optional `--dev` flag
+selects the same development stack. `just deploy down` stops it without
+installing or building native inference dependencies. The launcher owns both
+commands and rejects unknown commands or options before starting services.
+Use `just deploy up --help` for startup options; native vLLM options follow `--`.
 
 On first use, the command creates an untracked `.env` from `.env.example`,
 installs the locked native inference dependencies, builds the Metal extension,
@@ -34,17 +37,21 @@ Open `http://localhost:3000` to chat.
 The browser connects through the gateway at `http://localhost:8080/v1`.
 
 Detached mode is enabled by default; `just deploy`, `just deploy -d`, and
-`just deploy --detached` all start in the background and return.
-Follow startup progress and live vLLM and Docker output with
-`tail -f tools/deploy/deploy.log`. The log announces readiness after the native
-model and Compose services are ready; failures and cleanup appear there too.
-The log is ignored by Git.
+`just deploy --detached` stream launcher progress and live vLLM and Docker output,
+then return successfully only after the native model and Compose services are
+ready. The same output remains saved in the deployment log beside the launcher;
+each invocation prints its resolved location and streams only newly appended
+output. Model loading happens before containers start and may take several
+minutes. Startup failures return a nonzero exit status; Ctrl-C during startup
+cancels and streams cleanup. After readiness, detached services continue writing
+to that log in the background. The log is ignored by Git.
 
-Use `just deploy --detached=false` to keep the deployment and its live output in
-the terminal. Ctrl-C stops the Compose services and native server's workers,
-retaining containers and persistent volumes. `just deploy down` stops the
+Use `just deploy --detached=false` to keep streaming through the deployment's
+lifetime while retaining its output in the same log. Ctrl-C stops the Compose
+services and native server's workers, retaining containers and persistent
+volumes. `just deploy down` stops the
 project's deployment and native vLLM servers, including during startup, and
-streams `docker compose down` progress as it removes containers and the network.
+streams and saves shutdown output as it removes containers and the network.
 Persistent volumes are retained.
 Deployment code lives in
 [`tools/deploy`](tools/deploy/serve_mlx.py).
@@ -193,8 +200,9 @@ telemetry-only deployment, run
 | Check web process | `docker compose ps web` |
 | Web logs | `docker compose logs web` |
 | API logs | `docker compose logs api` |
-| Deployment and model logs | `tail -f tools/deploy/deploy.log` |
+| Deployment and model logs | Streamed by deployment commands; retained at the log path printed by the launcher |
 | Run with live terminal output | `just deploy --detached=false` |
+| Verify the web app through the configured model | `just web test` |
 | Stop a foreground session | Ctrl-C in its terminal |
 | Stop native models and remove application containers | `just deploy down` |
 
