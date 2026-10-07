@@ -602,7 +602,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "vllm", url = "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0%2Bcpu-cp312-cp312-macosx_11_0_arm64.whl" },
-    { name = "vllm-metal", url = "https://github.com/vllm-project/vllm-metal/releases/download/v0.31.0.dev20261006214222/vllm_metal-0.31.0.dev20261006214222-cp312-cp312-macosx_15_0_arm64.whl" },
+    { name = "vllm-metal", git = "https://github.com/vllm-project/vllm-metal?rev=27cfcd8b6b6f4a3daf89ca7e30597517efa57a2d" },
 ]
 
 [[package]]
@@ -2075,8 +2075,8 @@ provides-extras = ["zen", "bench", "tensorizer", "fastsafetensors", "instanttens
 
 [[package]]
 name = "vllm-metal"
-version = "0.31.0.dev20261006214222"
-source = { url = "https://github.com/vllm-project/vllm-metal/releases/download/v0.31.0.dev20261006214222/vllm_metal-0.31.0.dev20261006214222-cp312-cp312-macosx_15_0_arm64.whl" }
+version = "0.31.0"
+source = { git = "https://github.com/vllm-project/vllm-metal?rev=27cfcd8b6b6f4a3daf89ca7e30597517efa57a2d#27cfcd8b6b6f4a3daf89ca7e30597517efa57a2d" }
 dependencies = [
     { name = "accelerate", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "fastapi", extra = ["standard"], marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
@@ -2092,36 +2092,6 @@ dependencies = [
     { name = "starlette", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "transformers", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
 ]
-wheels = [
-    { url = "https://github.com/vllm-project/vllm-metal/releases/download/v0.31.0.dev20261006214222/vllm_metal-0.31.0.dev20261006214222-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:6121711b67c926b16e09660c4ed77ac2008996c2e4d69a7e94aa5deae6f4b3a2" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", specifier = ">=0.26.0" },
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.133.0,<0.137" },
-    { name = "gguf", marker = "extra == 'dev'", specifier = ">=0.17.0" },
-    { name = "gguf", marker = "extra == 'gguf'", specifier = ">=0.17.0" },
-    { name = "huggingface-hub", specifier = ">=1.31.0" },
-    { name = "librosa", marker = "extra == 'stt'", specifier = ">=0.10.2" },
-    { name = "llguidance", marker = "platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'ppc64le' or platform_machine == 'x86_64'", specifier = ">=1.7.0,<1.8.0" },
-    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==0.32.1" },
-    { name = "mlx-lm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", git = "https://github.com/ml-explore/mlx-lm?rev=9e6acca691e64d6d8bb808c328fcdea459099cca" },
-    { name = "mlx-vlm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.6.8,<0.7.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.19.1" },
-    { name = "nanobind", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==2.10.2" },
-    { name = "numba", marker = "extra == 'stt'", specifier = ">=0.59.0" },
-    { name = "numpy", specifier = ">=1.24.0" },
-    { name = "psutil", specifier = ">=5.9.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.2" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.0" },
-    { name = "safetensors", specifier = ">=0.4.0" },
-    { name = "starlette", specifier = ">=1.0.1" },
-    { name = "transformers", specifier = ">=5.10.4,<5.18.0" },
-    { name = "vllm-metal", extras = ["dev", "gguf", "stt"], marker = "extra == 'all'" },
-]
-provides-extras = ["gguf", "stt", "dev", "all"]
 
 [[package]]
 name = "watchfiles"

@@ -14,7 +14,7 @@ import serve_mlx
 
 
 class DeploymentTests(unittest.TestCase):
-    def launch(self, arguments=(), *, fail_compose=False, interrupt=False, fail_startup=False, fail_stop=False, output=None):
+    def launch(self, arguments=(), *, fail_compose=False, interrupt=False, fail_startup=False, fail_stop=False, build_error=None, output=None):
         server = Mock(pid=12345)
         server.poll.return_value = None if interrupt or fail_compose else 1
         server.wait.side_effect = [KeyboardInterrupt(), 0] if interrupt else None
@@ -31,11 +31,22 @@ class DeploymentTests(unittest.TestCase):
             stack.enter_context(patch.object(serve_mlx.socket, "socket"))
             stack.enter_context(patch.object(serve_mlx.signal, "signal"))
             start = stack.enter_context(patch.object(serve_mlx.subprocess, "Popen", return_value=server))
+
+            def build():
+                start.assert_not_called()
+                if build_error is not None:
+                    raise build_error
+
+            stack.enter_context(patch.object(serve_mlx, "build_metal_extension", side_effect=build))
             run = stack.enter_context(patch.object(serve_mlx.subprocess, "run", side_effect=calls))
             stop = stack.enter_context(patch.object(serve_mlx.os, "killpg"))
             stack.enter_context(patch.object(serve_mlx, "wait_until_ready", side_effect=RuntimeError("startup failed") if fail_startup else None))
             stack.enter_context(patch.object(serve_mlx.sys, "stdout", output if output is not None else io.StringIO()))
-            if fail_compose or fail_stop:
+            if build_error is not None:
+                with self.assertRaises(type(build_error)) as raised:
+                    serve_mlx.main()
+                self.assertIs(raised.exception, build_error)
+            elif fail_compose or fail_stop:
                 with self.assertRaises(subprocess.CalledProcessError):
                     serve_mlx.main()
             elif interrupt:
@@ -57,6 +68,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(command[-2:], ["--max-model-len", "2048"])
         self.assertNotIn("--detached=false", command)
         self.assertTrue(start.call_args.kwargs["start_new_session"])
+        self.assertEqual(start.call_args.kwargs["env"]["VLLM_METAL_BUILD_FROM_SOURCE"], "1")
         self.assertEqual(run.call_args_list[0].args[0], ["docker", "compose", "config", "--environment"])
         self.assertTrue(run.call_args_list[0].kwargs["capture_output"])
         self.assertEqual(run.call_args_list[1].args[0], ["docker", "compose", "up", "--wait"])
@@ -162,6 +174,14 @@ class DeploymentTests(unittest.TestCase):
         _, _, run, stop = self.launch(fail_startup=True)
         self.assertEqual(run.call_count, 1)
         stop.assert_called_once_with(12345, signal.SIGTERM)
+
+    def test_failed_native_build_preserves_error_and_starts_no_services(self):
+        for error in (RuntimeError("compiler failed"), KeyboardInterrupt()):
+            with self.subTest(error=type(error)):
+                _, start, run, stop = self.launch(build_error=error)
+                start.assert_not_called()
+                self.assertEqual(run.call_count, 1)  # Only reads Compose configuration.
+                stop.assert_not_called()
 
     def test_startup_failure_cannot_accept_another_process_health_response(self):
         server = Mock(returncode=1)

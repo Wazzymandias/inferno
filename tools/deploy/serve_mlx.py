@@ -49,6 +49,18 @@ def handle_termination(*_) -> None:
     raise KeyboardInterrupt
 
 
+def build_metal_extension() -> None:
+    """Build the pinned source dependency before starting any services.
+
+    Upstream reuses the extension when its sources and dependencies match.
+    MLX compiles the shaders separately during the native worker's warm-up.
+    """
+    from vllm_metal.metal.build import build
+
+    print("Preparing native Metal extension (requires Apple Command Line Tools)...", flush=True)
+    build()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dev", action="store_true", default=True, help="use the development deployment (default: true)")
@@ -122,8 +134,14 @@ def main() -> int:
     # Both native hooks are installed with the release; they publish resolved
     # model configuration for gateway startup, without shared asset paths.
     environment["PYTHONPATH"] = os.pathsep.join(filter(None, [str(root), environment.get("PYTHONPATH")]))
+    # The pinned source install has shader sources, not release metallibs.
+    # This selects upstream's MLX shader compilation during worker warm-up;
+    # the C++ extension is built below, before the server starts.
+    environment["VLLM_METAL_BUILD_FROM_SOURCE"] = "1"
+    # SIGTERM must also interrupt and clean up the compiler during preparation.
+    signal.signal(signal.SIGTERM, handle_termination)
+    build_metal_extension()
     # Never mistake another server's health endpoint for this child's startup.
-    print(f"Starting native vLLM on port {port}...", flush=True)
     with socket.socket() as listener:
         # Match vLLM's listener so recently closed connections allow a restart.
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -134,6 +152,7 @@ def main() -> int:
                 f"Cannot use native vLLM port {port}: {error.strerror}. "
                 "Stop its current server or choose another --port."
             ) from error
+    print(f"Starting native vLLM on port {port}...", flush=True)
     command = [
         str(Path(sys.executable).with_name("vllm")), "serve", model,
         "--served-model-name", model,
@@ -150,7 +169,6 @@ def main() -> int:
     server = subprocess.Popen(command, start_new_session=True, env=environment)
     compose_started = False
     try:
-        signal.signal(signal.SIGTERM, handle_termination)
         print("Waiting for vLLM readiness. Model loading may take several minutes...", flush=True)
         wait_until_ready(server, port)
         print("Native vLLM is ready.", flush=True)

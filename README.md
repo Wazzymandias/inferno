@@ -10,6 +10,8 @@ For `just deploy`, install [Just](https://github.com/casey/just),
 [uv](https://docs.astral.sh/uv/getting-started/installation/), and
 [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/).
 Native vLLM Metal requires an Apple Silicon Mac with macOS 15 or newer.
+Install Apple's Command Line Tools with `xcode-select --install` to build the
+pinned Metal source dependency.
 Docker runs the web app and gateway; vLLM runs directly on the host.
 
 Native service development additionally uses [Bun](https://bun.sh/get),
@@ -26,8 +28,9 @@ just deploy
 development stack. Use `just deploy down` or `just deploy down --dev` to stop it.
 
 On first use, the command creates an untracked `.env` from `.env.example`,
-installs the locked native inference dependencies, starts vLLM, waits for model
-readiness, and builds and starts Compose. Open `http://localhost:3000` to chat.
+installs the locked native inference dependencies, builds the Metal extension,
+starts vLLM, waits for model readiness, and builds and starts Compose.
+Open `http://localhost:3000` to chat.
 The browser connects through the gateway at `http://localhost:8080/v1`.
 
 Detached mode is enabled by default; `just deploy`, `just deploy -d`, and
@@ -47,9 +50,14 @@ Deployment code lives in
 [`tools/deploy`](tools/deploy/serve_mlx.py).
 
 The current dependency lock uses [vLLM 0.31.0](https://github.com/vllm-project/vllm/releases/tag/v0.31.0)
-and the matching [Metal prerelease](https://github.com/vllm-project/vllm-metal/releases/tag/v0.31.0.dev20261006214222).
-The exact wheel URLs and dependency hashes are locked; startup does not select
-an unpinned latest version. uv provisions the required Python version.
+and its matching [Metal source commit](https://github.com/vllm-project/vllm-metal/commit/27cfcd8b6b6f4a3daf89ca7e30597517efa57a2d).
+Upstream deletes previous Metal development releases, so their wheel URLs cannot
+support repeatable installs. uv locks the source revision and dependencies and
+provisions the required Python version. Before starting services, the launcher
+builds the native extension, reusing it while its sources and dependencies match.
+It enables upstream's source mode (`VLLM_METAL_BUILD_FROM_SOURCE=1`) so MLX
+compiles shaders during native worker warm-up. Full Xcode and the standalone
+Metal shader compiler are not required for this source mode.
 
 Choose a Hugging Face repository ID or local snapshot using `INFERENCE_MODEL`
 in `.env`. `INFERENCE_PORT` owns the native listener port; `just deploy` derives
