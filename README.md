@@ -153,6 +153,9 @@ configuration discovery, and cache policy:
   discovery middleware.
 - Native `--config` files are not accepted. Use `.env` and `VLLM_ARGS`.
 - Startup fails if the model or Metal configuration disables prefix caching.
+- Cache discovery supports full attention, sliding windows, and recurrent state
+  checkpoints. Unsupported lookup policies, including speculative decoding,
+  fail at startup rather than advertise incorrect reuse requirements.
 
 ### KV events
 
@@ -173,14 +176,17 @@ Set these in `.env` or export them in the shell:
   vLLM, outside the containers.
 - Endpoints and replay buffers last only as long as the native server process.
 - The gateway subscribes to discovered event sources and ranks replicas by
-  contiguous cached tokens minus active-request load, including streaming.
+  reusable prefix tokens minus active-request load, including streaming.
 - Set `INFERENCE_ENDPOINT` to comma-separated replica API URLs and tune
   `ROUTING_LOAD_PENALTY` (default `256`, positive) in `.env`. The launcher starts
   one local replica; configure external replicas when running Compose directly.
 - Sequence gaps, disconnects, evictions, and clears invalidate affected cache
   credit. Replay reconstructs disposable state without a shared database.
-- Replicas must share model preparation and hash policy. Cache group sizes and
-  addresses come from discovery, with no gateway block-size or port assumptions.
+- Replicas must share model preparation and hash policy. Each group's block size
+  and required history come from its native cache manager. Every group must be
+  reusable at the same prefix boundary: full attention needs the entire prefix,
+  sliding windows need their contiguous tail, and recurrent states need the
+  checkpoint at that boundary.
 
 **Discover the active publisher** on the native server, using its normal API authentication:
 
@@ -189,8 +195,10 @@ GET /v1/inferno/kv-events?model=<served-model>
 ```
 
 - The response contains resolved endpoints, the topic, the native `instance_id`,
-  and `sources`. Each source includes its `data_parallel_rank` and native
-  publisher configuration.
+  `cache_groups`, and `sources`. Each cache group specifies `block_size` and
+  `required_blocks` (null for the entire prefix, otherwise the required trailing
+  blocks). Each source includes its `data_parallel_rank` and native publisher
+  configuration.
 - Rediscover after every native restart; endpoints are process-scoped.
 - For `tcp://*:0`, vLLM advertises `VLLM_HOST_IP` when set, or detects the node
   address otherwise. Subscribers must be able to reach that address.

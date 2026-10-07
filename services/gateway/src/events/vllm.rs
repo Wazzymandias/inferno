@@ -8,14 +8,14 @@ use zeromq::{DealerSocket, Socket, SocketEvent, SocketRecv, SocketSend, SubSocke
 
 use super::invalid;
 use crate::{
-    backend::{Backend, CacheIndex, CacheUpdate, Pool},
+    backend::{Backend, CacheGroup, CacheIndex, CacheUpdate, Pool},
     inference::{BlockHash, ModelConfig},
 };
 
 #[derive(Deserialize)]
 struct Discovery {
     instance_id: String,
-    cache_groups: Vec<usize>,
+    cache_groups: Vec<CacheGroup>,
     sources: Vec<Source>,
 }
 

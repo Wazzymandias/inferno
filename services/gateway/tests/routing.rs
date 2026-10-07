@@ -43,7 +43,7 @@ async fn replica(identity: &'static str, config: Value, cached: bool) -> Replica
         .to_string();
     let mut replay = RouterSocket::new();
     let replay_endpoint = replay.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
-    let discovery = json!({"instance_id":identity, "cache_groups":[8], "sources":[{
+    let discovery = json!({"instance_id":identity, "cache_groups":[{"block_size":8,"required_blocks":null}], "sources":[{
         "data_parallel_rank":0, "enable_kv_cache_events":true, "publisher":"zmq",
         "endpoint":endpoint, "replay_endpoint":replay_endpoint, "topic":"cache"
     }]});

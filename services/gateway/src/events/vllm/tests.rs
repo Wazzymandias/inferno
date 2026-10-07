@@ -27,7 +27,7 @@ fn message(sequence: u64, payload: &[u8]) -> ZmqMessage {
 #[test]
 fn native_wire_events_update_residency_and_filter_other_storage() {
     let input = input();
-    let mut cache = CacheIndex::new(&[8], 8).unwrap();
+    let mut cache = CacheIndex::new(&[crate::backend::tests::full_group(8)], 8).unwrap();
     for (payload, expected) in [(STORED, 24), (REMOVED, 8), (STORED, 24), (CLEARED, 0)] {
         let (sequence, updates) = decode(message(258, payload), "cache", false)
             .unwrap()
@@ -86,7 +86,7 @@ fn subscription(endpoint: String, replay_endpoint: String) -> Subscription {
         timeout: Duration::from_secs(2),
         discovery: Discovery {
             instance_id: "instance".into(),
-            cache_groups: vec![8],
+            cache_groups: vec![crate::backend::tests::full_group(8)],
             sources: vec![Source {
                 data_parallel_rank: 0,
                 enable_kv_cache_events: true,

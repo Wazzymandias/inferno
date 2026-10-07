@@ -5,7 +5,7 @@ mod client;
 mod pool;
 mod tls;
 
-pub(crate) use cache::{CacheIndex, CacheUpdate};
+pub(crate) use cache::{CacheGroup, CacheIndex, CacheUpdate};
 pub(crate) use client::Backend;
 pub(crate) use pool::{Pool, RequestLease};
 

@@ -1,4 +1,4 @@
-use super::{CacheIndex, CacheUpdate, Pool};
+use super::{CacheGroup, CacheIndex, CacheUpdate, Pool};
 use crate::inference::{InputProcessor, ModelConfig, ModelInput};
 use std::time::Duration;
 
@@ -35,8 +35,15 @@ pub(crate) fn pool(count: usize) -> Pool {
     pool
 }
 
+pub(crate) fn full_group(block_size: usize) -> CacheGroup {
+    CacheGroup {
+        block_size,
+        required_blocks: None,
+    }
+}
+
 fn store(input: &ModelInput, blocks: usize) -> CacheIndex {
-    let mut cache = CacheIndex::new(&[input.block_size()], input.block_size()).unwrap();
+    let mut cache = CacheIndex::new(&[full_group(input.block_size())], input.block_size()).unwrap();
     cache
         .apply(vec![CacheUpdate::Store {
             group: 0,
@@ -97,7 +104,7 @@ fn eviction_stops_at_the_missing_ancestor_and_clear_is_replica_local() {
 fn every_cache_group_must_match_at_a_shared_block_boundary() {
     let input = input();
     let size = input.block_size();
-    let mut cache = CacheIndex::new(&[size, 2 * size], size).unwrap();
+    let mut cache = CacheIndex::new(&[full_group(size), full_group(2 * size)], size).unwrap();
     cache
         .apply(vec![CacheUpdate::Store {
             group: 0,
@@ -149,6 +156,99 @@ fn malformed_batch_discards_all_residency_without_changing_load() {
 #[test]
 fn invalid_cache_granularity_is_rejected() {
     for (groups, hash) in [(vec![], 8), (vec![0], 8), (vec![7], 8), (vec![8], 0)] {
+        let groups: Vec<_> = groups.into_iter().map(full_group).collect();
         assert!(CacheIndex::new(&groups, hash).is_err());
     }
+}
+
+#[test]
+fn sparse_checkpoints_only_count_at_the_same_reusable_boundary() {
+    let input = input();
+    let size = input.block_size();
+    let checkpoint = CacheGroup {
+        block_size: size,
+        required_blocks: std::num::NonZeroUsize::new(1),
+    };
+    let mut cache = CacheIndex::new(&[checkpoint, checkpoint, full_group(size)], size).unwrap();
+    for (group, indices) in [(0, vec![1, 3]), (1, vec![2, 3]), (2, vec![0, 1, 2, 3])] {
+        cache
+            .apply(vec![CacheUpdate::Store {
+                group,
+                block_size: size,
+                hashes: indices
+                    .into_iter()
+                    .map(|index| input.prefix_hashes()[index])
+                    .collect(),
+            }])
+            .unwrap();
+    }
+    assert_eq!(cache.cached_tokens(&input), 4 * size);
+    cache
+        .apply(vec![CacheUpdate::Remove {
+            group: 0,
+            hashes: vec![input.prefix_hashes()[3]],
+        }])
+        .unwrap();
+    assert_eq!(cache.cached_tokens(&input), 0);
+    cache
+        .apply(vec![CacheUpdate::Store {
+            group: 0,
+            block_size: size,
+            hashes: vec![input.prefix_hashes()[3]],
+        }])
+        .unwrap();
+    let pool = pool(2);
+    pool.replace_cache(0, Some(store(&input, 3)));
+    pool.replace_cache(1, Some(cache));
+    assert_eq!(selected(&pool, &input), "replica-1");
+    pool.apply_batch(
+        1,
+        vec![CacheUpdate::Remove {
+            group: 0,
+            hashes: vec![input.prefix_hashes()[3]],
+        }],
+    )
+    .unwrap();
+    assert_eq!(selected(&pool, &input), "replica-0");
+}
+
+#[test]
+fn windows_require_contiguous_tail_blocks_but_allow_shorter_initial_prefixes() {
+    let input = input();
+    let size = input.block_size();
+    let window = CacheGroup {
+        block_size: size,
+        required_blocks: std::num::NonZeroUsize::new(3),
+    };
+    let mut cache = CacheIndex::new(&[full_group(size), window], size).unwrap();
+    cache
+        .apply(vec![
+            CacheUpdate::Store {
+                group: 0,
+                block_size: size,
+                hashes: input.prefix_hashes()[..4].to_vec(),
+            },
+            CacheUpdate::Store {
+                group: 1,
+                block_size: size,
+                hashes: input.prefix_hashes()[1..4].to_vec(),
+            },
+        ])
+        .unwrap();
+    assert_eq!(cache.cached_tokens(&input), 4 * size);
+    cache
+        .apply(vec![CacheUpdate::Remove {
+            group: 1,
+            hashes: vec![input.prefix_hashes()[1]],
+        }])
+        .unwrap();
+    assert_eq!(cache.cached_tokens(&input), 0);
+    cache
+        .apply(vec![CacheUpdate::Store {
+            group: 1,
+            block_size: size,
+            hashes: vec![input.prefix_hashes()[0]],
+        }])
+        .unwrap();
+    assert_eq!(cache.cached_tokens(&input), size);
 }

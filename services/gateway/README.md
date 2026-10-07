@@ -236,11 +236,14 @@ concurrently. The cache index is disposable process memory. The `events/vllm`
 adapter converts vLLM discovery and wire events into backend-neutral cache
 updates; residency and ranking live under `backend`.
 
-Only contiguous, complete blocks resident locally in every cache group receive
-credit. Group sizes come from the scheduler, and matches end at a boundary shared
-by all groups. CPU and remote storage events cannot claim local GPU residency.
-The conservative contiguous rule may undercount sparse sliding-window or Mamba
-caches. It never credits a descendant across a missing ancestor.
+Cache group sizes and required history come from the native cache managers.
+`required_blocks` is null for full history, a positive count for a sliding
+window, and one for a state checkpoint. Every group must satisfy its requirement
+at the same prefix boundary; taking the minimum of unrelated checkpoints would
+claim a prefix the backend cannot reuse. Full-history groups still stop at a
+missing ancestor. Only complete physical blocks receive credit, and CPU or
+remote storage events cannot claim local GPU residency. Unsupported lookup
+policies, including speculative decoding, fail discovery at native startup.
 
 Subscriptions connect to discovered addresses and consume topic, big-endian
 sequence, and MessagePack batch frames. Replay rebuilds the index before it

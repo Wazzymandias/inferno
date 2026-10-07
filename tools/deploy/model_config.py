@@ -52,9 +52,31 @@ class ExportingScheduler(AsyncScheduler):
         scheduler = native_config.get_scheduler_cls()(vllm_config, *args, **kwargs)
         write_json(prefix_path(vllm_config), {
             "prefix": prefix_config(scheduler),
-            "cache_groups": list(scheduler.kv_cache_manager.coordinator.group_block_sizes),
+            "cache_groups": cache_groups(scheduler),
         })
         return scheduler
+
+
+def cache_groups(scheduler) -> list[dict]:
+    """Export the history each native lookup requires at a reusable boundary."""
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager, SlidingWindowManager
+
+    if scheduler.vllm_config.speculative_config is not None:
+        raise ValueError("prefix routing does not support speculative cache lookup")
+    groups = []
+    for manager in scheduler.kv_cache_manager.coordinator.single_type_managers:
+        lookup = manager.find_longest_cache_hit.__func__
+        if lookup is FullAttentionManager.find_longest_cache_hit.__func__:
+            required = None
+        elif lookup is MambaManager.find_longest_cache_hit.__func__:
+            required = 1
+        elif lookup is SlidingWindowManager.find_longest_cache_hit.__func__:
+            # Native lookup still needs a cached boundary when the window is one token.
+            required = max(1, manager._contiguous_blocks_for_hit(manager.kv_cache_spec.sliding_window, manager.block_size, False))
+        else:
+            raise ValueError(f"prefix routing does not support {type(manager).__name__} cache lookup")
+        groups.append({"block_size": manager.block_size, "required_blocks": required})
+    return groups
 
 
 def prefix_config(scheduler) -> dict:

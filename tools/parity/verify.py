@@ -18,7 +18,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def prepare_cases(cases: list[dict], model: str, configuration: dict):
+def prepare_cases(cases: list[dict], model: str, discovery: dict[str, dict]):
     """Capture forwarded JSON, then inspect every input with the backend offline."""
     # Tool-schema key order becomes template tokens. Obtain canonical JSON from
     # the forwarding owner rather than reproducing its serializer in Python.
@@ -27,10 +27,10 @@ def prepare_cases(cases: list[dict], model: str, configuration: dict):
         def do_GET(self):
             assert self.headers.get("Authorization") == "Bearer configuration-test-token"
             parsed = urllib.parse.urlsplit(self.path)
-            assert parsed.path == "/v1/inferno/model-config"
+            assert parsed.path in discovery
             assert urllib.parse.parse_qs(parsed.query) == {"model": [model]}
-            discovery_calls.append(self.path)
-            body = json.dumps(configuration).encode()
+            discovery_calls.append(parsed.path)
+            body = json.dumps(discovery[parsed.path]).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -83,7 +83,7 @@ def prepare_cases(cases: list[dict], model: str, configuration: dict):
             gateway.wait(timeout=10)
             backend.shutdown()
             backend.server_close()
-        assert len(discovery_calls) == 1, "configuration must be discovered once before serving"
+        assert sorted(discovery_calls) == sorted(discovery), "replica configuration must be discovered once before serving"
         results = []
         for case, wire in zip(cases, requests, strict=True):
             rendered = subprocess.run([
@@ -105,11 +105,13 @@ def main() -> None:
     headers = {"Content-Type": "application/json"}
     if os.environ.get("INFERENCE_API_KEY"):
         headers["Authorization"] = "Bearer " + os.environ["INFERENCE_API_KEY"]
-    url = arguments.inference_endpoint.rstrip("/") + "/inferno/model-config?" + urllib.parse.urlencode({"model": arguments.model})
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
-        configuration = json.load(response)
-    prepared = prepare_cases(cases, arguments.model, configuration)
-    prefix = configuration["prefix"]
+    discovery = {}
+    for resource in ("model-config", "kv-events"):
+        url = arguments.inference_endpoint.rstrip("/") + f"/inferno/{resource}?" + urllib.parse.urlencode({"model": arguments.model})
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+            discovery[f"/v1/inferno/{resource}"] = json.load(response)
+    prepared = prepare_cases(cases, arguments.model, discovery)
+    prefix = discovery["/v1/inferno/model-config"]["prefix"]
     matched = rejected = 0
     for case, (wire, rendered) in zip(cases, prepared, strict=True):
         request = urllib.request.Request(
