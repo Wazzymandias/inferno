@@ -3,6 +3,7 @@
 import argparse
 from collections.abc import Callable
 import io
+import json
 import os
 from pathlib import Path
 import platform
@@ -275,6 +276,45 @@ def prepare_native_environment(root: Path, startup: Startup) -> Path:
     return python.with_name("vllm")
 
 
+def cache_arguments(settings: dict[str, str]) -> list[str]:
+    """Own cache policy; vLLM owns binding, assigned ports, and socket lifetime."""
+    events = {
+        "enable_kv_cache_events": True,
+        "publisher": "zmq",
+        "endpoint": settings.get("INFERENCE_KV_EVENTS_ENDPOINT") or "tcp://*:0",
+        "replay_endpoint": settings.get("INFERENCE_KV_EVENTS_REPLAY_ENDPOINT") or "tcp://*:0",
+        "topic": settings.get("INFERENCE_KV_EVENTS_TOPIC") or "kv-events",
+    }
+    return [
+        "--enable-prefix-caching",
+        "--prefix-caching-hash-algo", "sha256_cbor",
+        "--kv-events-config", json.dumps(events),
+    ]
+
+
+def validate_native_arguments(options: list[str]) -> None:
+    """Keep deployment policy out of native overrides, including JSON subkeys."""
+    owned = {
+        "--host", "--port", "--model", "--served-model-name",
+        "--enable-scale-out", "--no-enable-scale-out", "--scheduler-cls",
+        "--middleware", "--enable-prefix-caching", "--no-enable-prefix-caching",
+        "--prefix-caching-hash-algo", "--kv-events-config", "--config",
+    }
+    for option in options:
+        # vLLM accepts underscores, abbreviated long flags, =values, and dotted
+        # JSON keys. A config file would introduce another policy owner.
+        flag = option.split("=", 1)[0].split(".", 1)[0].replace("_", "-")
+        if flag in ("-c", "--") or (
+            flag.startswith("--") and any(name.startswith(flag) for name in owned)
+        ):
+            raise RuntimeError(
+                "model, listener, served name, render API, model discovery, and cache policy "
+                "are owned by this command; use INFERENCE_KV_EVENTS_ENDPOINT, "
+                "INFERENCE_KV_EVENTS_REPLAY_ENDPOINT, and INFERENCE_KV_EVENTS_TOPIC "
+                "for KV event configuration; native config files are not accepted"
+            )
+
+
 def main() -> int:
     parser, arguments = parse_arguments(sys.argv[1:])
     if platform.system() != "Darwin" or platform.machine() != "arm64":
@@ -319,11 +359,7 @@ def run_deployment(arguments: argparse.Namespace, root: Path, startup: Startup) 
     except (argparse.ArgumentTypeError, ValueError):
         raise RuntimeError("set a valid INFERENCE_PORT and shell-quoted VLLM_ARGS in .env")
     extra = configured_args + arguments.vllm_args
-    # These flags belong to this command. Overrides would disconnect the app
-    # from the process or change the verification API's availability.
-    owned = {"--host", "--port", "--model", "--served-model-name", "--enable-scale-out", "--no-enable-scale-out", "--scheduler-cls", "--prefix-caching-hash-algo"}
-    if any(option.split("=", 1)[0] in owned for option in extra):
-        raise RuntimeError("model, listener, served name, render API, and model configuration discovery are owned by this command")
+    validate_native_arguments(extra)
     environment = os.environ.copy()
     # The process being launched owns Compose's model and backend connection.
     environment["INFERENCE_MODEL"] = model
@@ -336,6 +372,8 @@ def run_deployment(arguments: argparse.Namespace, root: Path, startup: Startup) 
     # This selects upstream's MLX shader compilation during worker warm-up;
     # the C++ extension is built below, before the server starts.
     environment["VLLM_METAL_BUILD_FROM_SOURCE"] = "1"
+    if settings.get("VLLM_HOST_IP"):
+        environment["VLLM_HOST_IP"] = settings["VLLM_HOST_IP"]
     native = prepare_native_environment(root, startup)
     # Never mistake another server's health endpoint for this child's startup.
     with socket.socket() as listener:
@@ -356,7 +394,7 @@ def run_deployment(arguments: argparse.Namespace, root: Path, startup: Startup) 
         "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
         # Exposes /v1/responses/render on this same inference server.
         "--enable-scale-out",
-        "--prefix-caching-hash-algo", "sha256_cbor",
+        *cache_arguments(settings),
         "--scheduler-cls", "tools.deploy.model_config.ExportingScheduler",
         "--middleware", "tools.deploy.model_config.ModelConfigMiddleware",
         *extra,

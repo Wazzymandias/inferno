@@ -177,10 +177,23 @@ For a separately launched vLLM 0.31.0 server, put this repository on `PYTHONPATH
 and include the same integration:
 
 ```sh
+--enable-prefix-caching \
 --prefix-caching-hash-algo sha256_cbor \
+--kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:0","replay_endpoint":"tcp://*:0","topic":"kv-events"}' \
 --scheduler-cls tools.deploy.model_config.ExportingScheduler \
 --middleware tools.deploy.model_config.ModelConfigMiddleware
 ```
+
+The launcher builds the KV events JSON automatically from
+`INFERENCE_KV_EVENTS_ENDPOINT`, `INFERENCE_KV_EVENTS_REPLAY_ENDPOINT`, and
+`INFERENCE_KV_EVENTS_TOPIC`; see [native configuration](../../README.md#kv-events).
+For a separate server, the JSON above is supplied directly to vLLM. Use
+`tcp://*:0` for independent OS-assigned event and replay ports, or explicit ZMQ
+endpoints for your deployment. No port relationship to HTTP is required.
+`GET /v1/infergate/kv-events?model=...` on the native server returns the active
+instance and resolved publisher sources under native API authentication.
+Rediscover after a restart. Startup requires prefix caching and a ZMQ publisher
+with replay; native configurations that disable prefix caching fail startup.
 
 Then configure only its endpoint, served model, and credentials if required. The
 integration follows the locked native version; backend upgrades require checking

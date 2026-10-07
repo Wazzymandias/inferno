@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -18,6 +18,13 @@ from fixtures import fixture_model
 
 
 class ModelConfigTests(unittest.TestCase):
+    def test_native_downgrade_of_prefix_caching_fails_before_scheduler_creation(self):
+        from types import SimpleNamespace
+
+        config = SimpleNamespace(diffusion_config=None, cache_config=SimpleNamespace(enable_prefix_caching=False))
+        with self.assertRaisesRegex(ValueError, "requires prefix caching"):
+            ExportingScheduler(config)
+
     def test_native_scheduler_selection_and_resolved_hash_granularity(self):
         from vllm.config import ModelConfig, VllmConfig, DeviceConfig, CacheConfig, SchedulerConfig
         from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, FullAttentionSpec, SlidingWindowSpec
@@ -63,6 +70,12 @@ class ModelConfigTests(unittest.TestCase):
 
         application = Starlette()
         application.state.vllm_config = SimpleNamespace(instance_id="test-instance")
+        from vllm.config.kv_events import KVEventsConfig
+        source = KVEventsConfig(
+            enable_kv_cache_events=True, publisher="zmq", endpoint="ipc://resolved-events",
+            replay_endpoint="ipc://resolved-replay", topic="discovered-topic",
+        )
+        application.state.engine_client = Mock(get_kv_event_sources=Mock(return_value={0: source}))
         application.add_middleware(ModelConfigMiddleware)
         application.add_middleware(AuthenticationMiddleware, tokens=["test-token"])
         resolved = {"encoder": {"models": ["fixture"]}, "tokenizer_json": "exact loaded assets"}
@@ -81,7 +94,41 @@ class ModelConfigTests(unittest.TestCase):
                         self.assertEqual(response.json(), resolved)
                     self.assertEqual(client.get("/v1/infergate/model-config?model=other", headers=headers).status_code, 404)
                     self.assertEqual(client.post(url, headers=headers).status_code, 405)
+                    events_url = "/v1/infergate/kv-events?model=fixture"
+                    self.assertEqual(client.get(events_url).status_code, 401)
+                    response = client.get(events_url, headers=headers)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.headers["cache-control"], "no-store")
+                    events = response.json()
+                    self.assertEqual(events["instance_id"], "test-instance")
+                    self.assertEqual(events["sources"][0]["endpoint"], source.endpoint)
+                    self.assertEqual(events["sources"][0]["replay_endpoint"], source.replay_endpoint)
+                    self.assertEqual(events["sources"][0]["topic"], source.topic)
+                    self.assertEqual(events["sources"][0]["data_parallel_rank"], 0)
+                    self.assertEqual(client.get("/v1/infergate/kv-events?model=other", headers=headers).status_code, 404)
+                    self.assertEqual(client.post(events_url, headers=headers).status_code, 405)
                 resolve.assert_called_once_with(application.state, {"block_size":16})
+                application.state.engine_client.get_kv_event_sources.assert_called_once_with()
+
+    def test_missing_native_event_publisher_prevents_readiness(self):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+        from types import SimpleNamespace
+        from vllm.config.kv_events import KVEventsConfig
+
+        for sources in ({}, {0: KVEventsConfig()}, {0: KVEventsConfig(enable_kv_cache_events=True)}):
+            with self.subTest(sources=sources), tempfile.TemporaryDirectory() as temp:
+                application = Starlette()
+                application.state.vllm_config = SimpleNamespace(instance_id="test-instance")
+                application.state.engine_client = Mock(get_kv_event_sources=Mock(return_value=sources))
+                application.add_middleware(ModelConfigMiddleware)
+                with patch("model_config.tempfile.gettempdir", return_value=temp), patch(
+                    "model_config.model_config", return_value={"encoder": {"models": ["fixture"]}},
+                ):
+                    prefix_path(application.state.vllm_config).write_text('{}')
+                    with self.assertRaisesRegex(ValueError, "requires a native ZMQ KV event publisher with replay"):
+                        with TestClient(application):
+                            self.fail("native readiness must fail")
 
     def test_configuration_failure_prevents_native_readiness(self):
         from starlette.applications import Starlette

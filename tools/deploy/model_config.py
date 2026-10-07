@@ -6,6 +6,7 @@ The completed configuration is served from memory, without rendering requests.
 """
 
 import copy
+from dataclasses import asdict
 import hashlib
 import json
 from importlib.metadata import version
@@ -41,6 +42,8 @@ class ExportingScheduler(AsyncScheduler):
     def __new__(cls, vllm_config, *args, **kwargs):
         if vllm_config.diffusion_config is not None:
             raise ValueError("local preparation does not support diffusion schedulers")
+        if not vllm_config.cache_config.enable_prefix_caching:
+            raise ValueError("this deployment requires prefix caching; the selected native configuration disabled it")
         native_config = copy.copy(vllm_config.scheduler_config)
         native_config.scheduler_cls = None
         scheduler = native_config.get_scheduler_cls()(vllm_config, *args, **kwargs)
@@ -153,15 +156,38 @@ class ModelConfigMiddleware:
                 path.unlink()
                 body = json.dumps(resolved, ensure_ascii=False).encode()
                 models = frozenset(resolved["encoder"]["models"])
+                # The engine handshake carries the publisher's bound addresses.
+                # Input configuration still contains :0 and cannot be used by
+                # subscribers. Keep process-specific discovery out of the model
+                # asset snapshot that the gateway also uses offline.
+                sources = application.state.engine_client.get_kv_event_sources()
+                if not sources or any(
+                    not source.enable_kv_cache_events or source.publisher != "zmq" or not source.replay_endpoint
+                    for source in sources.values()
+                ):
+                    raise ValueError("this deployment requires a native ZMQ KV event publisher with replay")
+                events_body = json.dumps({
+                    "instance_id": application.state.vllm_config.instance_id,
+                    "sources": [
+                        {"data_parallel_rank": rank, **asdict(source)}
+                        for rank, source in sorted(sources.items())
+                    ],
+                }).encode()
 
                 async def configuration(request):
                     if request.query_params.get("model") not in models:
                         return JSONResponse({"error": "model is not served by this deployment"}, status_code=404)
                     return Response(body, media_type="application/json")
 
+                async def events(request):
+                    if request.query_params.get("model") not in models:
+                        return JSONResponse({"error": "model is not served by this deployment"}, status_code=404)
+                    return Response(events_body, media_type="application/json", headers={"Cache-Control": "no-store"})
+
                 # Register inside the application so native authentication and
                 # other middleware apply to discovery exactly as to inference.
                 application.add_route("/v1/infergate/model-config", configuration, methods=["GET"])
+                application.add_route("/v1/infergate/kv-events", events, methods=["GET"])
             await send(message)
 
         await self.app(scope, receive, publish_before_ready)

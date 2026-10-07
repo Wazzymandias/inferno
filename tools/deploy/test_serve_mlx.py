@@ -3,6 +3,7 @@
 import argparse
 from contextlib import ExitStack, contextmanager
 import io
+import json
 import os
 from pathlib import Path
 import select
@@ -19,12 +20,14 @@ import serve_mlx
 
 
 class DeploymentTests(unittest.TestCase):
-    def launch(self, arguments=(), *, fail_compose=False, interrupt=False, fail_startup=False, fail_stop=False, build_error=None, output=None):
+    def launch(self, arguments=(), *, fail_compose=False, interrupt=False, fail_startup=False, fail_stop=False, build_error=None, output=None, settings=None, argument_error=False):
         server = Mock(pid=12345)
         server.poll.return_value = None if interrupt or fail_compose else 1
         server.wait.side_effect = [KeyboardInterrupt(), 0] if interrupt else None
         server.wait.return_value = 1
-        configuration = Mock(stdout="INFERENCE_MODEL=example/model\nINFERENCE_PORT=9000\nVLLM_ARGS=--max-model-len 2048\n")
+        values = {"INFERENCE_MODEL": "example/model", "INFERENCE_PORT": "9000", "VLLM_ARGS": "--max-model-len 2048"}
+        values.update(settings or {})
+        configuration = Mock(stdout="".join(f"{key}={value}\n" for key, value in values.items()))
         failure = subprocess.CalledProcessError(1, ["docker", "compose", "up"])
         stop_failure = subprocess.CalledProcessError(1, ["docker", "compose", "stop"])
         calls = [configuration, failure if fail_compose else Mock(), stop_failure if fail_stop else Mock()]
@@ -47,12 +50,18 @@ class DeploymentTests(unittest.TestCase):
                     raise build_error
                 return root / "tools/deploy/.venv/bin/vllm"
 
-            stack.enter_context(patch.object(serve_mlx, "prepare_native_environment", side_effect=build))
+            prepare = stack.enter_context(patch.object(serve_mlx, "prepare_native_environment", side_effect=build))
             run = stack.enter_context(patch.object(serve_mlx.subprocess, "run", side_effect=calls))
             stop = stack.enter_context(patch.object(serve_mlx.os, "killpg"))
             stack.enter_context(patch.object(serve_mlx, "wait_until_ready", side_effect=RuntimeError("startup failed") if fail_startup else None))
             stack.enter_context(patch.object(serve_mlx.sys, "stdout", output if output is not None else io.StringIO()))
-            if build_error is not None:
+            if argument_error:
+                with self.assertRaisesRegex(RuntimeError, "owned by this command"):
+                    serve_mlx.main()
+                prepare.assert_not_called()
+                start.assert_not_called()
+                self.assertEqual(run.call_count, 1)
+            elif build_error is not None:
                 with self.assertRaises(type(build_error)) as raised:
                     serve_mlx.main()
                 self.assertIs(raised.exception, build_error)
@@ -103,6 +112,52 @@ class DeploymentTests(unittest.TestCase):
                 self.assertTrue(start.call_args.kwargs["start_new_session"])
                 self.assertNotIn("-d", start.call_args.args[0])
                 self.assertNotIn("--detached", start.call_args.args[0])
+
+    def test_cache_policy_uses_native_dynamic_ports_independent_of_http(self):
+        for settings in ({}, {
+            "INFERENCE_KV_EVENTS_ENDPOINT": "", "INFERENCE_KV_EVENTS_REPLAY_ENDPOINT": "",
+            "INFERENCE_KV_EVENTS_TOPIC": "",
+        }):
+            with self.subTest(settings=settings):
+                _, start, _, _ = self.launch(["--port", "9123"], settings=settings)
+                command = start.call_args.args[0]
+                self.assertEqual(command.count("--enable-prefix-caching"), 1)
+                self.assertEqual(command[command.index("--prefix-caching-hash-algo") + 1], "sha256_cbor")
+                events = json.loads(command[command.index("--kv-events-config") + 1])
+                self.assertEqual(events, {
+                    "enable_kv_cache_events": True, "publisher": "zmq",
+                    "endpoint": "tcp://*:0", "replay_endpoint": "tcp://*:0", "topic": "kv-events",
+                })
+
+    def test_cache_endpoints_and_topic_come_from_resolved_environment(self):
+        settings = {
+            "INFERENCE_KV_EVENTS_ENDPOINT": "tcp://*:19273",
+            "INFERENCE_KV_EVENTS_REPLAY_ENDPOINT": "tcp://*:28164",
+            "INFERENCE_KV_EVENTS_TOPIC": 'model "one" / cache 🦀',
+            "VLLM_HOST_IP": "127.0.0.1",
+        }
+        _, start, _, _ = self.launch(settings=settings)
+        command = start.call_args.args[0]
+        events = json.loads(command[command.index("--kv-events-config") + 1])
+        self.assertEqual(events["endpoint"], settings["INFERENCE_KV_EVENTS_ENDPOINT"])
+        self.assertEqual(events["replay_endpoint"], settings["INFERENCE_KV_EVENTS_REPLAY_ENDPOINT"])
+        self.assertEqual(events["topic"], settings["INFERENCE_KV_EVENTS_TOPIC"])
+        self.assertEqual(start.call_args.kwargs["env"]["VLLM_HOST_IP"], "127.0.0.1")
+
+    def test_native_overrides_fail_before_build_or_startup(self):
+        overrides = (
+            "--no-enable-prefix-caching", "--enable_prefix_caching=false",
+            "--prefix-caching-hash-algo sha256", "--prefix-caching-hash-algo=sha256",
+            "--kv-events-config '{}'", "--kv_events_config.enable_kv_cache_events=false",
+            "--kv-events-config.replay_endpoint=null", "--kv-events-conf '{}'",
+            "--no-enable-prefix-c", "--config settings.yaml", "-c settings.yaml",
+            "--scheduler_cls=other.Scheduler", "--middleware other.Middleware",
+        )
+        for override in overrides:
+            with self.subTest(override=override, source="environment"):
+                self.launch(settings={"VLLM_ARGS": override}, argument_error=True)
+            with self.subTest(override=override, source="CLI"):
+                self.launch(["--", *serve_mlx.shlex.split(override)], argument_error=True)
 
     def test_invalid_detached_values_fail_before_launch(self):
         for value in ("invalid", "0", "1"):
