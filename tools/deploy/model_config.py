@@ -44,10 +44,16 @@ class ExportingScheduler(AsyncScheduler):
             raise ValueError("local preparation does not support diffusion schedulers")
         if not vllm_config.cache_config.enable_prefix_caching:
             raise ValueError("this deployment requires prefix caching; the selected native configuration disabled it")
+        from vllm import envs
+        if envs.VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES:
+            raise ValueError("prefix routing requires VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=0")
         native_config = copy.copy(vllm_config.scheduler_config)
         native_config.scheduler_cls = None
         scheduler = native_config.get_scheduler_cls()(vllm_config, *args, **kwargs)
-        write_json(prefix_path(vllm_config), prefix_config(scheduler))
+        write_json(prefix_path(vllm_config), {
+            "prefix": prefix_config(scheduler),
+            "cache_groups": list(scheduler.kv_cache_manager.coordinator.group_block_sizes),
+        })
         return scheduler
 
 
@@ -152,7 +158,8 @@ class ModelConfigMiddleware:
                 from starlette.responses import JSONResponse, Response
                 application = scope["app"]
                 path = prefix_path(application.state.vllm_config)
-                resolved = model_config(application.state, json.loads(path.read_text()))
+                snapshot = json.loads(path.read_text())
+                resolved = model_config(application.state, snapshot["prefix"])
                 path.unlink()
                 body = json.dumps(resolved, ensure_ascii=False).encode()
                 models = frozenset(resolved["encoder"]["models"])
@@ -168,6 +175,7 @@ class ModelConfigMiddleware:
                     raise ValueError("this deployment requires a native ZMQ KV event publisher with replay")
                 events_body = json.dumps({
                     "instance_id": application.state.vllm_config.instance_id,
+                    "cache_groups": snapshot["cache_groups"],
                     "sources": [
                         {"data_parallel_rank": rank, **asdict(source)}
                         for rank, source in sorted(sources.items())

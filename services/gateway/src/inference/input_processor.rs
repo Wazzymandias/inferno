@@ -28,7 +28,11 @@ impl InputProcessor {
         request.validate()?;
         let encoded = self.encoder.encode(request)?;
         let prefix_hashes = self.prefix_hasher.hash(&encoded)?;
-        Ok(ModelInput::new(encoded.token_ids, prefix_hashes))
+        Ok(ModelInput::new(
+            encoded.token_ids,
+            prefix_hashes,
+            self.prefix_hasher.block_size(),
+        ))
     }
 }
 

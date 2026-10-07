@@ -400,6 +400,79 @@ fn processor() -> crate::inference::InputProcessor {
 }
 
 #[tokio::test]
+async fn streaming_load_lasts_until_completion_cancellation_or_body_error() {
+    let mock = Router::new().fallback(any(|uri: Uri| async move {
+        if uri.query() != Some("stream") {
+            return Body::from("done");
+        }
+        Body::from_stream(futures_util::stream::unfold(true, |first| async move {
+            if first {
+                Some((
+                    Ok::<_, std::io::Error>(Bytes::from_static(b"data: first\n\n")),
+                    false,
+                ))
+            } else {
+                std::future::pending().await
+            }
+        }))
+    }));
+    let (upstream, task) = serve(mock).await;
+    let mut pool = Pool::new();
+    for replica in ["zero", "one"] {
+        pool.add(
+            format!("{upstream}/{replica}/v1").parse().unwrap(),
+            Duration::from_secs(1),
+            None,
+        )
+        .unwrap();
+    }
+    let gateway = Gateway::new("127.0.0.1".parse().unwrap(), 0, processor()).with_pool(pool);
+    let request = || {
+        serde_json::from_value(
+            serde_json::json!({"model":"fixture", "input":"hello", "stream":true}),
+        )
+        .unwrap()
+    };
+    let input = gateway.processor.prepare(&request()).unwrap();
+    let selected = || {
+        gateway
+            .select(&input)
+            .unwrap()
+            .0
+            .url("responses", None)
+            .path()
+            .to_owned()
+    };
+    let response = gateway
+        .create_response(Some("stream"), HeaderMap::new(), request())
+        .await
+        .unwrap();
+    assert_eq!(selected(), "/one/v1/responses");
+    drop(response);
+    assert_eq!(selected(), "/zero/v1/responses");
+    let response = gateway
+        .create_response(None, HeaderMap::new(), request())
+        .await
+        .unwrap();
+    assert_eq!(selected(), "/one/v1/responses");
+    axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(selected(), "/zero/v1/responses");
+    let response = gateway
+        .create_response(Some("stream"), HeaderMap::new(), request())
+        .await
+        .unwrap();
+    assert!(
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .is_err()
+    );
+    assert_eq!(selected(), "/zero/v1/responses");
+    task.abort();
+}
+
+#[tokio::test]
 async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = Arc::new(AtomicUsize::new(0));

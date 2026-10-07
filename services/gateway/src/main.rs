@@ -4,6 +4,7 @@ use std::error::Error;
 
 mod backend;
 mod cli;
+mod events;
 mod gateway;
 mod inference;
 mod telemetry;

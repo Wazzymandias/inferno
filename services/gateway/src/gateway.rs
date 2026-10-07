@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::backend;
-use crate::backend::Backend;
+use crate::backend::{Backend, RequestLease};
 use crate::inference;
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +44,18 @@ impl Gateway {
         self
     }
 
+    async fn subscribe_events(&self, shutdown: CancellationToken) -> io::Result<()> {
+        futures_util::future::try_join_all(
+            self.pool
+                .subscriptions()
+                .iter()
+                .enumerate()
+                .map(|(id, subscription)| subscription.run(&self.pool, id, shutdown.clone())),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub(crate) const fn with_limits(
         mut self,
         body_limit: usize,
@@ -54,10 +66,8 @@ impl Gateway {
         self
     }
 
-    /// Preparation is complete before selection. Cache-aware selection is not
-    /// implemented yet; all requests still use the first configured backend.
-    pub(crate) fn select(&self, _input: &inference::ModelInput) -> Option<&Backend> {
-        self.pool.first()
+    pub(crate) fn select(&self, input: &inference::ModelInput) -> Option<(&Backend, RequestLease)> {
+        self.pool.rank(Some(input))
     }
 
     pub(crate) async fn serve<F>(
@@ -78,7 +88,8 @@ impl Gateway {
         let gateway = Arc::new(self);
         let shutdown = CancellationToken::new();
         tokio::try_join!(
-            gateway.serve_http(listener, shutdown.clone()),
+            Arc::clone(&gateway).serve_http(listener, shutdown.clone()),
+            gateway.subscribe_events(shutdown.clone()),
             signal_handler(shutdown),
         )?;
         Ok(())

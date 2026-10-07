@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use axum::http::HeaderMap;
+use axum::{http::HeaderMap, response::Response};
 
-use super::Gateway;
+use super::{Gateway, routes::upstream_response};
 use crate::inference::{CreateResponseRequest, InputError, ModelInput};
 
 impl Gateway {
@@ -13,17 +13,18 @@ impl Gateway {
         query: Option<&str>,
         headers: HeaderMap,
         request: CreateResponseRequest,
-    ) -> Result<reqwest::Response, InputError> {
+    ) -> Result<Response, InputError> {
         let (request, input) = self.prepare_input(request).await?;
-        let backend = self.select(&input).ok_or(InputError::NoBackend)?;
+        let (backend, lease) = self.select(&input).ok_or(InputError::NoBackend)?;
 
-        Ok(backend
+        let response = backend
             .client
             .post(backend.url("responses", query))
             .headers(headers)
             .json(&request)
             .send()
-            .await?)
+            .await?;
+        Ok(upstream_response(response, lease))
     }
 
     /// Run CPU preparation outside the async executor, moving the request

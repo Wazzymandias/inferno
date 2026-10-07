@@ -23,7 +23,7 @@ pub(super) struct EncodedInput {
     pub(super) cache_salt: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EncoderConfig {
     pub(super) models: Vec<String>,
@@ -37,7 +37,7 @@ pub(super) struct EncoderConfig {
     tokenizer_sha256: [u8; 32],
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct TemplateConfig {
     source: String,

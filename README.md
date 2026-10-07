@@ -147,7 +147,8 @@ The launcher owns the model, listener, served name, render API, model
 configuration discovery, and cache policy:
 
 - It enables prefix caching with `sha256_cbor` for reproducible native/Rust hashes.
-- It enables the native ZMQ KV event publisher with replay.
+- It enables the native ZMQ KV event publisher with replay and sets
+  `VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=0` to retain all 32 hash bytes.
 - Extra arguments cannot override these settings, the scheduler hook, or the
   discovery middleware.
 - Native `--config` files are not accepted. Use `.env` and `VLLM_ARGS`.
@@ -171,7 +172,15 @@ Set these in `.env` or export them in the shell:
 - Compose resolves configuration for the launcher. The publisher runs in native
   vLLM, outside the containers.
 - Endpoints and replay buffers last only as long as the native server process.
-- The gateway does not yet consume KV events for routing.
+- The gateway subscribes to discovered event sources and ranks replicas by
+  contiguous cached tokens minus active-request load, including streaming.
+- Set `INFERENCE_ENDPOINT` to comma-separated replica API URLs and tune
+  `ROUTING_LOAD_PENALTY` (default `256`, positive) in `.env`. The launcher starts
+  one local replica; configure external replicas when running Compose directly.
+- Sequence gaps, disconnects, evictions, and clears invalidate affected cache
+  credit. Replay reconstructs disposable state without a shared database.
+- Replicas must share model preparation and hash policy. Cache group sizes and
+  addresses come from discovery, with no gateway block-size or port assumptions.
 
 **Discover the active publisher** on the native server, using its normal API authentication:
 

@@ -11,4 +11,5 @@ pub(crate) use error::InputError;
 pub(crate) use input_processor::InputProcessor;
 pub(crate) use model_config::ModelConfig;
 pub(crate) use model_input::ModelInput;
+pub(crate) use prefix::BlockHash;
 pub(crate) use request::CreateResponseRequest;

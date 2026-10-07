@@ -372,6 +372,7 @@ def run_deployment(arguments: argparse.Namespace, root: Path, startup: Startup) 
     # This selects upstream's MLX shader compilation during worker warm-up;
     # the C++ extension is built below, before the server starts.
     environment["VLLM_METAL_BUILD_FROM_SOURCE"] = "1"
+    environment["VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES"] = "0"
     if settings.get("VLLM_HOST_IP"):
         environment["VLLM_HOST_IP"] = settings["VLLM_HOST_IP"]
     native = prepare_native_environment(root, startup)

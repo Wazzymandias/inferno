@@ -9,38 +9,6 @@ use reqwest::{
 
 use super::tls::install_crypto_provider;
 
-#[derive(Debug)]
-pub(crate) struct Pool {
-    backends: Vec<Backend>,
-}
-
-impl Pool {
-    pub(crate) const fn new() -> Self {
-        Self {
-            backends: Vec::new(),
-        }
-    }
-
-    pub(crate) fn add(
-        &mut self,
-        endpoint: Url,
-        timeout: Duration,
-        authorization: Option<HeaderValue>,
-    ) -> Result<&Backend, Box<dyn Error>> {
-        self.backends
-            .push(Backend::new(endpoint, timeout, authorization)?);
-        Ok(self.backends.last().expect("the backend was just added"))
-    }
-
-    pub(crate) fn first(&self) -> Option<&Backend> {
-        self.backends.first()
-    }
-
-    pub(crate) const fn is_empty(&self) -> bool {
-        self.backends.is_empty()
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct Backend {
     pub(crate) client: Client,

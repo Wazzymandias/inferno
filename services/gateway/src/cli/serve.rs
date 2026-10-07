@@ -11,12 +11,8 @@ use bpaf::Bpaf;
 use reqwest::Url;
 use tokio_util::sync::CancellationToken;
 
-use super::{inference_api_key, inference_endpoint, inference_model, inference_timeout};
-use crate::{
-    backend::Pool,
-    gateway::Gateway,
-    inference::{InputProcessor, ModelConfig},
-};
+use super::{inference_api_key, inference_endpoints, inference_model, inference_timeout};
+use crate::{backend::Pool, gateway::Gateway, inference::InputProcessor};
 
 /// Inferno: an OpenAI-compatible inference gateway. Flags override environment variables.
 #[derive(Clone, Debug, Bpaf)]
@@ -34,8 +30,12 @@ pub(crate) struct ServeCommand {
     port: u16,
 
     /// OpenAI-compatible HTTP(S) API endpoint (required)
-    #[bpaf(external(inference_endpoint))]
-    endpoint: Url,
+    #[bpaf(external(inference_endpoints))]
+    endpoints: Vec<Url>,
+
+    /// Cached-token cost of each active request, including streaming
+    #[bpaf(long("routing-load-penalty"), env("ROUTING_LOAD_PENALTY"), argument("TOKENS"), fallback(NonZeroUsize::new(256).unwrap()))]
+    load_penalty: NonZeroUsize,
 
     #[bpaf(external(inference_api_key))]
     api_key: Option<reqwest::header::HeaderValue>,
@@ -65,13 +65,14 @@ pub(crate) struct ServeCommand {
 
 impl ServeCommand {
     pub(crate) async fn execute(self) -> Result<(), Box<dyn Error>> {
-        let mut pool = Pool::new();
-        let backend = pool.add(
-            self.endpoint,
+        let (pool, config) = Pool::connect(
+            self.endpoints,
+            &self.model,
             Duration::from_secs(self.timeout.get()),
             self.api_key,
-        )?;
-        let config = ModelConfig::discover(backend, &self.model).await?;
+            self.load_penalty.get(),
+        )
+        .await?;
         let processor = InputProcessor::load(config)?;
         Gateway::new(self.address, self.port, processor)
             .with_pool(pool)

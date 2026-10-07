@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use super::{InputError, hugging_face::EncoderConfig, prefix::PrefixConfig};
 use crate::backend::Backend;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ModelConfig {
     format: String,
@@ -29,6 +29,9 @@ impl std::fmt::Debug for ModelConfig {
 }
 
 impl ModelConfig {
+    pub(crate) const fn block_size(&self) -> usize {
+        self.prefix.block_size()
+    }
     /// Serving always discovers the active deployment's configuration before
     /// accepting requests. A previous cache entry cannot authorize stale hashes.
     pub(crate) async fn discover(backend: &Backend, model: &str) -> Result<Self, InputError> {

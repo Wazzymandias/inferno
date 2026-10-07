@@ -88,6 +88,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("--detached=false", command)
         self.assertTrue(start.call_args.kwargs["start_new_session"])
         self.assertEqual(start.call_args.kwargs["env"]["VLLM_METAL_BUILD_FROM_SOURCE"], "1")
+        self.assertEqual(start.call_args.kwargs["env"]["VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES"], "0")
         self.assertEqual(run.call_args_list[0].args[0], ["docker", "compose", "config", "--environment"])
         self.assertTrue(run.call_args_list[0].kwargs["capture_output"])
         self.assertEqual(run.call_args_list[1].args[0], ["docker", "compose", "up", "--wait"])

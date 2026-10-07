@@ -25,6 +25,14 @@ class ModelConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires prefix caching"):
             ExportingScheduler(config)
 
+    def test_integer_event_hashes_fail_before_scheduler_creation(self):
+        from types import SimpleNamespace
+
+        config = SimpleNamespace(diffusion_config=None, cache_config=SimpleNamespace(enable_prefix_caching=True))
+        with patch.dict(os.environ, VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES="1"):
+            with self.assertRaisesRegex(ValueError, "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=0"):
+                ExportingScheduler(config)
+
     def test_native_scheduler_selection_and_resolved_hash_granularity(self):
         from vllm.config import ModelConfig, VllmConfig, DeviceConfig, CacheConfig, SchedulerConfig
         from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, FullAttentionSpec, SlidingWindowSpec
@@ -49,7 +57,7 @@ class ModelConfigTests(unittest.TestCase):
             ])
             from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
             block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_config, config)
-            with patch.dict(os.environ, PYTHONHASHSEED="42"), patch("model_config.tempfile.gettempdir", return_value=temp):
+            with patch.dict(os.environ, PYTHONHASHSEED="42", VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES="0"), patch("model_config.tempfile.gettempdir", return_value=temp):
                 for asynchronous, native_type in [(False, Scheduler), (True, AsyncScheduler)]:
                     config.scheduler_config.async_scheduling = asynchronous
                     result = ExportingScheduler(
@@ -58,9 +66,10 @@ class ModelConfigTests(unittest.TestCase):
                     )
                     self.assertIs(type(result), native_type)
                     exported = json.loads(prefix_path(config).read_text())
-                    self.assertEqual(exported["block_size"], 16)
-                    self.assertEqual(bytes(exported["initial_parent"]), sha256_cbor("42"))
+                    self.assertEqual(exported["prefix"]["block_size"], 16)
+                    self.assertEqual(bytes(exported["prefix"]["initial_parent"]), sha256_cbor("42"))
                     self.assertEqual(config.cache_config.block_size, 32)
+                    self.assertEqual(exported["cache_groups"], [16, 32])
 
     def test_discovery_is_a_startup_snapshot_protected_by_native_authentication(self):
         from starlette.applications import Starlette
@@ -81,7 +90,7 @@ class ModelConfigTests(unittest.TestCase):
         resolved = {"encoder": {"models": ["fixture"]}, "tokenizer_json": "exact loaded assets"}
         with tempfile.TemporaryDirectory() as temp, patch("model_config.tempfile.gettempdir", return_value=temp):
             path = prefix_path(application.state.vllm_config)
-            path.write_text('{"block_size":16}')
+            path.write_text('{"prefix":{"block_size":16},"cache_groups":[16]}')
             with patch("model_config.model_config", return_value=resolved) as resolve:
                 with TestClient(application) as client:
                     self.assertFalse(path.exists())
@@ -101,6 +110,7 @@ class ModelConfigTests(unittest.TestCase):
                     self.assertEqual(response.headers["cache-control"], "no-store")
                     events = response.json()
                     self.assertEqual(events["instance_id"], "test-instance")
+                    self.assertEqual(events["cache_groups"], [16])
                     self.assertEqual(events["sources"][0]["endpoint"], source.endpoint)
                     self.assertEqual(events["sources"][0]["replay_endpoint"], source.replay_endpoint)
                     self.assertEqual(events["sources"][0]["topic"], source.topic)
@@ -125,7 +135,7 @@ class ModelConfigTests(unittest.TestCase):
                 with patch("model_config.tempfile.gettempdir", return_value=temp), patch(
                     "model_config.model_config", return_value={"encoder": {"models": ["fixture"]}},
                 ):
-                    prefix_path(application.state.vllm_config).write_text('{}')
+                    prefix_path(application.state.vllm_config).write_text('{"prefix":{},"cache_groups":[16]}')
                     with self.assertRaisesRegex(ValueError, "requires a native ZMQ KV event publisher with replay"):
                         with TestClient(application):
                             self.fail("native readiness must fail")
@@ -142,7 +152,7 @@ class ModelConfigTests(unittest.TestCase):
         async def send(message):
             messages.append(message["type"])
         with tempfile.TemporaryDirectory() as temp, patch("model_config.tempfile.gettempdir", return_value=temp):
-            prefix_path(application.state.vllm_config).write_text('{}')
+            prefix_path(application.state.vllm_config).write_text('{"prefix":{},"cache_groups":[16]}')
             with patch("model_config.model_config", side_effect=ValueError("unsupported encoder")):
                 with self.assertRaisesRegex(ValueError, "unsupported encoder"):
                     asyncio.run(application({"type":"lifespan", "state":{}}, receive, send))
