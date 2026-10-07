@@ -6,17 +6,24 @@ provides a React chat interface. The gateway lives in
 
 ## Requirements
 
-For `just deploy`, install [Just](https://github.com/casey/just),
-[uv](https://docs.astral.sh/uv/getting-started/installation/), and
-[Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/).
-Native vLLM Metal requires an Apple Silicon Mac with macOS 15 or newer.
-Install Apple's Command Line Tools with `xcode-select --install` to build the
-pinned Metal source dependency.
-Docker runs the web app and gateway; vLLM runs directly on the host.
-
-Native service development additionally uses [Bun](https://bun.sh/get),
-[Rust nightly](https://www.rust-lang.org/tools/install), and
-[cargo-nextest](https://nexte.st/docs/installation/).
+- [Just](https://github.com/casey/just) — runs the project commands.
+- [Rust nightly](https://www.rust-lang.org/tools/install) with Clippy and rustfmt —
+  for native gateway development. [rust-toolchain.toml](rust-toolchain.toml)
+  selects `nightly` without pinning a date.
+- [Bun 1.4.2](https://bun.sh/get) — for native web development; matches the
+  project's container image.
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) — installs the
+  locked native inference environment and provisions Python.
+- [Docker Desktop with Docker Compose](https://docs.docker.com/desktop/setup/install/mac-install/) —
+  runs the web app, gateway, and optional telemetry services.
+- [cargo-nextest](https://nexte.st/docs/installation/) — runs the gateway tests.
+- **Apple Silicon Mac with macOS 15 or newer** — required for native vLLM Metal.
+- **Apple Command Line Tools** — provides the C++ compiler for the Metal
+  extension. Install with `xcode-select --install`.
+- **Git** — fetches the pinned Metal source; included in Apple's Command Line Tools.
+- **Python 3.12** — provisioned automatically by uv; no separate install needed.
+- **Ninja 1.13.2** — installed automatically by uv with the native dependencies.
+- **Chromium** — installed automatically by `just web test` for browser tests.
 
 ## Quickstart
 
@@ -24,99 +31,209 @@ Native service development additionally uses [Bun](https://bun.sh/get),
 just deploy up
 ```
 
-`just deploy` remains shorthand for `just deploy up`. The optional `--dev` flag
-selects the same development stack. `just deploy down` stops it without
-installing or building native inference dependencies. The launcher owns both
-commands and rejects unknown commands or options before starting services.
-Use `just deploy up --help` for startup options; native vLLM options follow `--`.
+Open **[localhost:3000](http://localhost:3000)** to chat. Chat requests pass through
+the gateway, available at [localhost:8080/v1](http://localhost:8080/v1).
 
-On first use, the command creates an untracked `.env` from `.env.example`,
-installs the locked native inference dependencies, builds the Metal extension,
-starts vLLM, waits for model readiness, and builds and starts Compose.
-Open `http://localhost:3000` to chat.
-The browser connects through the gateway at `http://localhost:8080/v1`.
+**On first startup, the launcher:**
 
-Detached mode is enabled by default; `just deploy`, `just deploy -d`, and
-`just deploy --detached` stream launcher progress and live vLLM and Docker output,
-then return successfully only after the native model and Compose services are
-ready. The same output remains saved in the deployment log beside the launcher;
-each invocation prints its resolved location and streams only newly appended
-output. Model loading happens before containers start and may take several
-minutes. Startup failures return a nonzero exit status; Ctrl-C during startup
-cancels and streams cleanup. After readiness, detached services continue writing
-to that log in the background. The log is ignored by Git.
+1. Creates an untracked `.env` from [.env.example](.env.example).
+2. Installs the locked inference dependencies and builds the Metal extension.
+3. Starts native vLLM and waits for the model to be ready.
+4. Builds and starts the Compose services.
 
-Use `just deploy --detached=false` to keep streaming through the deployment's
-lifetime while retaining its output in the same log. Ctrl-C stops the Compose
-services and native server's workers, retaining containers and persistent
-volumes. `just deploy down` stops the
-project's deployment and native vLLM servers, including during startup, and
-streams and saves shutdown output as it removes containers and the network.
-Persistent volumes are retained.
-Deployment code lives in
-[`tools/deploy`](tools/deploy/serve_mlx.py).
+Model loading happens before containers start and may take several minutes.
+vLLM runs on the host; Docker runs the web app and gateway.
 
-The current dependency lock uses [vLLM 0.31.0](https://github.com/vllm-project/vllm/releases/tag/v0.31.0)
-and its matching [Metal source commit](https://github.com/vllm-project/vllm-metal/commit/27cfcd8b6b6f4a3daf89ca7e30597517efa57a2d).
-Upstream deletes previous Metal development releases, so their wheel URLs cannot
-support repeatable installs. uv locks the source revision and dependencies and
-provisions the required Python version. Before starting services, the launcher
-builds the native extension, reusing it while its sources and dependencies match.
-It enables upstream's source mode (`VLLM_METAL_BUILD_FROM_SOURCE=1`) so MLX
-compiles shaders during native worker warm-up. Full Xcode and the standalone
-Metal shader compiler are not required for this source mode.
+**Jump to:** [Deployment](#deployment) · [Native inference](#native-inference-on-apple-silicon) ·
+[Existing server](#use-an-existing-vllm-server) · [Web app](#chat-in-the-browser) ·
+[Telemetry](#telemetry) · [Checks and logs](#check-debug-or-stop)
 
-Choose a Hugging Face repository ID or local snapshot using `INFERENCE_MODEL`
-in `.env`. `INFERENCE_PORT` owns the native listener port; `just deploy` derives
-Compose's backend connection from it and supplies the same served model ID to
-both vLLM and the web app. The example uses a small Llama checkpoint. First
-startup downloads weights if they are not cached.
+## Deployment
 
-Arguments override the configured model and port for that session:
+### Commands
+
+| Task | Command |
+| --- | --- |
+| Start and return when ready | `just deploy up` or `just deploy` |
+| Explicitly select detached mode | `just deploy -d` or `just deploy --detached` |
+| Keep streaming until shutdown | `just deploy --detached=false` |
+| Stop the project and remove its containers | `just deploy down` |
+| Show startup options | `just deploy up --help` |
+
+- `--dev` selects the same development stack.
+- Native vLLM options go after `--`.
+- The launcher handles both `up` and `down` and rejects unknown commands or
+  options before starting services.
+- `down` does not install or build native inference dependencies.
+- Deployment code lives in [tools/deploy](tools/deploy/serve_mlx.py).
+
+### Readiness and shutdown
+
+| Action | What happens |
+| --- | --- |
+| Start in detached mode (default) | Streams startup output and returns successfully only after the model and Compose services are ready. Services keep running in the background. |
+| Start with `--detached=false` | Streams output for the deployment's lifetime. |
+| Startup fails | Returns a nonzero exit status. |
+| Press Ctrl-C during startup | Cancels startup and streams cleanup output. |
+| Press Ctrl-C in a foreground session | Stops Compose services and native vLLM workers. Keeps containers and persistent volumes. |
+| Run `just deploy down` | Stops this project's deployment and native vLLM servers, even during startup. Removes containers and the network; keeps persistent volumes. |
+
+### Logs
+
+- Commands stream launcher progress and live vLLM and Docker output.
+- The same output is saved to `tools/deploy/deploy.log`, beside the launcher.
+- Each invocation prints the resolved log path and streams only newly appended output.
+- Detached services keep writing to the log after startup returns.
+- Shutdown output is also streamed and saved. The log is ignored by Git.
+
+## Native inference on Apple Silicon
+
+### Choose a model and port
+
+Set these in the root `.env`:
+
+| Setting | Purpose |
+| --- | --- |
+| `INFERENCE_MODEL` | Hugging Face repository ID or local snapshot directory. |
+| `INFERENCE_PORT` | Native vLLM listener port. |
+| `VLLM_ARGS` | Additional native vLLM options. |
+
+- `just deploy` derives Compose's backend URL from `INFERENCE_PORT`.
+- It supplies the same served model ID to vLLM and the web app.
+- The example uses a small Llama checkpoint. Weights download on first startup
+  if they are not already cached.
+
+Override the configured model and port for one session:
 
 ```sh
 just deploy --model your-hf-model --port 8002
 ```
 
-`VLLM_ARGS` in `.env` configures native vLLM options. Additional options can be
-passed after `--`. The example limits the development KV cache to 1,024 native
-blocks and lets vLLM fit the context length to its actual cache layout. Adjust
-that capacity for your model and memory budget. vLLM owns the model's chat template, message content format,
-and tokenization policy. Gateway startup discovers the loaded tokenizer, selected
-templates, and resolved prefix-hash policy from the configured native server and
-caches them automatically. The Rust gateway prepares tokens and hashes locally
-before forwarding each create request; there is no per-request render RPC.
-`/v1/responses/render` is exposed for parity verification only.
-Automatic tool calls use the Hermes parser.
+Pass additional native options after `--`:
 
-For Qwen text chat, configure its native options explicitly:
+```sh
+just deploy -- --max-num-seqs 2
+```
+
+The example `VLLM_ARGS` limits the development KV cache to **1,024 native blocks**
+and lets vLLM fit the context length to that cache layout. Adjust the capacity
+for your model and memory budget.
+
+### Qwen text chat
+
+Configure the model and native options explicitly:
 
 ```dotenv
 INFERENCE_MODEL=lmstudio-community/Qwen3.8-27B-MLX-4bit
-VLLM_ARGS=--num-gpu-blocks-override 1024 --max-model-len auto --language-model-only --reasoning-parser qwen3
+VLLM_ARGS='--num-gpu-blocks-override 1024 --max-model-len auto --language-model-only --reasoning-parser qwen3'
 ```
 
-`--language-model-only` serves text without loading the checkpoint's image
-processor. `--reasoning-parser qwen3` separates reasoning from the answer.
-Model, listener, served name, render API, and model configuration discovery belong to the
-launcher. It selects `sha256_cbor` for reproducible native/Rust hashes; additional
-arguments cannot override that algorithm or the scheduler hook.
+- `--language-model-only` serves text without loading the checkpoint's image processor.
+- `--reasoning-parser qwen3` separates reasoning from the answer.
 
-To use an already-running native vLLM server, set `INFERENCE_ENDPOINT` and
-`INFERENCE_MODEL` in `.env`. The server must enable the
-[model configuration integration](services/gateway/README.md#automatic-model-configuration).
-Set `INFERENCE_API_KEY` if that backend requires authentication.
-Then run `docker compose up -d --wait`.
-Compose manages only the application and optional telemetry services.
+### Request preparation and cache policy
 
-### Chat in the browser
+- **vLLM** owns the chat template, message content format, and tokenization policy.
+- **Gateway startup** discovers and caches the loaded tokenizer, selected
+  templates, and resolved prefix-hash policy from the native server.
+- **Each create request** gets its tokens and hashes prepared locally in Rust
+  before forwarding. There is no per-request render RPC.
+- **`/v1/responses/render`** is exposed for parity verification only.
+- **Automatic tool calls** use the Hermes parser.
 
-The React app in [`apps/web`](apps/web/README.md) streams Responses API replies.
-`INFERENCE_TEMPERATURE` and `INFERENCE_MAX_OUTPUT_TOKENS` in `.env` configure
-sampling and reply length. The web app owns their defaults and validation;
-Compose passes overrides. `WEB_HOST_ADDR`, `WEB_HOST_PORT`, and `WEB_PORT`
-configure the web listener and published address. `WEB_INFERENCE_ENDPOINT`
-and `WEB_INFERENCE_API_KEY` select and authenticate another inference service.
+The launcher owns the model, listener, served name, render API, model
+configuration discovery, and cache policy:
+
+- It enables prefix caching with `sha256_cbor` for reproducible native/Rust hashes.
+- It enables the native ZMQ KV event publisher with replay.
+- Extra arguments cannot override these settings, the scheduler hook, or the
+  discovery middleware.
+- Native `--config` files are not accepted. Use `.env` and `VLLM_ARGS`.
+- Startup fails if the model or Metal configuration disables prefix caching.
+
+### KV events
+
+Set these in `.env` or export them in the shell:
+
+| Setting | Unset or empty value | Purpose |
+| --- | --- | --- |
+| `INFERENCE_KV_EVENTS_ENDPOINT` | `tcp://*:0` | Complete native ZMQ event endpoint. |
+| `INFERENCE_KV_EVENTS_REPLAY_ENDPOINT` | `tcp://*:0` | Complete native ZMQ replay endpoint. |
+| `INFERENCE_KV_EVENTS_TOPIC` | `kv-events` | Event topic. |
+| `VLLM_HOST_IP` | Auto-detected | Native node address for OS-assigned KV endpoints. |
+
+**Port ownership and routing:**
+
+- vLLM binds independent OS-assigned ports for `tcp://*:0`. The launcher does
+  not reserve ports or derive them from the HTTP port.
+- Compose resolves configuration for the launcher. The publisher runs in native
+  vLLM, outside the containers.
+- Endpoints and replay buffers last only as long as the native server process.
+- The gateway does not yet consume KV events for routing.
+
+**Discover the active publisher** on the native server, using its normal API authentication:
+
+```http
+GET /v1/infergate/kv-events?model=<served-model>
+```
+
+- The response contains resolved endpoints, the topic, the native `instance_id`,
+  and `sources`. Each source includes its `data_parallel_rank` and native
+  publisher configuration.
+- Rediscover after every native restart; endpoints are process-scoped.
+- For `tcp://*:0`, vLLM advertises `VLLM_HOST_IP` when set, or detects the node
+  address otherwise. Subscribers must be able to reach that address.
+- For an explicit wildcard bind endpoint, subscribers must substitute a
+  reachable server address.
+
+### Locked dependencies and Metal builds
+
+| Dependency | Locked version |
+| --- | --- |
+| vLLM | [0.31.0](https://github.com/vllm-project/vllm/releases/tag/v0.31.0) |
+| vLLM Metal | [Source commit `27cfcd8b6b6f4a3daf89ca7e30597517efa57a2d`](https://github.com/vllm-project/vllm-metal/commit/27cfcd8b6b6f4a3daf89ca7e30597517efa57a2d) |
+
+- **Repeatable installs:** upstream deletes previous Metal development releases,
+  so their wheel URLs are unreliable. uv locks the matching source revision and
+  dependencies and provisions the required Python version.
+- **Extension build:** the launcher builds the native extension before starting
+  services. It reuses the build while sources and dependencies still match.
+- **Shader compilation:** `VLLM_METAL_BUILD_FROM_SOURCE=1` enables upstream's
+  source mode. MLX compiles shaders during native worker warm-up.
+- **Tooling:** source mode requires neither full Xcode nor the standalone Metal
+  shader compiler.
+
+## Use an existing vLLM server
+
+1. Enable the [model configuration integration](services/gateway/README.md#automatic-model-configuration)
+   on the native server.
+2. Set `INFERENCE_ENDPOINT` and `INFERENCE_MODEL` in `.env`.
+3. Set `INFERENCE_API_KEY` if the backend requires authentication.
+4. Start Compose:
+
+   ```sh
+   docker compose up -d --wait
+   ```
+
+Compose manages the application and optional telemetry services. The existing
+native server runs separately.
+
+## Chat in the browser
+
+The React app in [apps/web](apps/web/README.md) streams Responses API replies.
+Configure it through the root `.env`:
+
+| Setting | Purpose |
+| --- | --- |
+| `INFERENCE_TEMPERATURE` | Sampling temperature. |
+| `INFERENCE_MAX_OUTPUT_TOKENS` | Reply length budget. |
+| `WEB_HOST_ADDR` | Host address for the published web port. |
+| `WEB_HOST_PORT` | Web port published on the host. |
+| `WEB_PORT` | Web service listener port. |
+| `WEB_INFERENCE_ENDPOINT` | Select another inference service. |
+| `WEB_INFERENCE_API_KEY` | Authenticate with that inference service. |
+
+The web app owns generation defaults and validation; Compose passes overrides.
 
 For standalone frontend development:
 
@@ -126,72 +243,21 @@ bun install --frozen-lockfile
 bun run dev --inference-endpoint http://localhost:8080/v1 --model your-model-id
 ```
 
-### Telemetry
+## Telemetry
 
-Set `COMPOSE_PROFILES=metrics` in your untracked `.env`, then run:
+### Enable SigNoz
 
-```sh
-just deploy
-```
+1. Set `COMPOSE_PROFILES=metrics` in your untracked `.env`.
+2. Allocate **at least 4 GB of Docker memory** for SigNoz, in addition to the
+   app and model's requirements.
+3. Run `just deploy`.
+4. Open **[localhost:8081](http://localhost:8081)** and create your SigNoz account.
+   SigNoz then activates the collector's ingestion pipelines through OpAMP.
 
-The root Compose file statically includes
-[`telemetry/compose.yaml`](telemetry/compose.yaml). The `metrics` profile enables
-SigNoz, its OTel collector, ClickHouse, ClickHouse Keeper, PostgreSQL, and both
-setup jobs on the app's network. `.env.example` defaults to
-`COMPOSE_PROFILES=`, so telemetry is disabled by default. Remove `metrics`
-from the profile list to disable telemetry. An empty or unset profile list
-enables only the web and API in Compose.
+See the [telemetry guide](docs/TELEMETRY.md) for configuration, storage,
+export endpoints, and shutdown instructions.
 
-A one-off initialization container generates a random database password and
-retains it in a Docker volume. PostgreSQL and SigNoz read it through read-only
-mounts. `SIGNOZ_POSTGRES_PASSWORD` optionally supplies your own URL-safe password
-on first startup; keep the existing value if upgrading an initialized deployment.
-`SIGNOZ_POSTGRES_DSN` can override SigNoz's database URI;
-`SIGNOZ_CLICKHOUSE_DSN` configures the ClickHouse connection used by SigNoz, the
-collector, and the migration job. A one-off migration container initializes and
-upgrades the telemetry schema before SigNoz and the collector start. Named volumes
-retain credentials, telemetry, and account data across container restarts.
-Allocate at least 4 GB of Docker memory for SigNoz, in addition to the app and
-model's requirements.
-
-Open `http://localhost:8081` and create your SigNoz account. SigNoz then activates
-the collector's ingestion pipelines through OpAMP. `SIGNOZ_HOST` defaults
-to `127.0.0.1`; `SIGNOZ_UI_PORT`, `SIGNOZ_OTLP_GRPC_PORT`, and
-`SIGNOZ_OTLP_HTTP_PORT` configure the published UI and ingestion ports. ClickHouse,
-Keeper, and PostgreSQL have no published host ports.
-
-Instrumented services on the Compose network can export to
-`http://signoz-otel-collector:4317` (OTLP/gRPC) or
-`http://signoz-otel-collector:4318` (OTLP/HTTP). Host processes use `localhost`
-and the corresponding published port. Configure the SDK's OTLP protocol to
-match the endpoint. This starts the telemetry backend; application instrumentation
-and cloud collection agents must be configured separately.
-
-The `SIGNOZ_IMAGE`, `SIGNOZ_COLLECTOR_IMAGE`, `SIGNOZ_CLICKHOUSE_IMAGE`,
-`SIGNOZ_KEEPER_IMAGE`, and `SIGNOZ_POSTGRES_IMAGE` settings in `.env.example`
-lock upstream dependencies by digest. The configurations are adapted from
-[Foundry v0.3.0](https://github.com/SigNoz/foundry/tree/v0.3.0/docs/examples/docker/compose),
-and run directly with Compose; Foundry is not a runtime dependency. The ClickHouse
-build installs SigNoz's histogram function v0.0.1 with architecture-specific
-SHA-256 verification, so container startup does not download executables.
-
-With the `metrics` profile enabled, inspect or stop the deployment with ordinary
-Compose commands:
-
-```sh
-docker compose ps -a
-docker compose logs signoz signoz-otel-collector signoz-migrate
-docker compose down
-```
-
-`down` retains named volumes; adding `--volumes` deletes credentials, stored
-telemetry, and SigNoz accounts. To disable a running telemetry stack, stop it while
-the `metrics` profile is enabled before removing it from `COMPOSE_PROFILES`;
-changing the profile list alone does not stop existing containers. For a
-telemetry-only deployment, run
-`docker compose -f telemetry/compose.yaml --profile metrics up -d --wait`.
-
-### Check, debug, or stop
+## Check, debug, or stop
 
 | Task | Command or endpoint |
 | --- | --- |
@@ -200,10 +266,10 @@ telemetry-only deployment, run
 | Check web process | `docker compose ps web` |
 | Web logs | `docker compose logs web` |
 | API logs | `docker compose logs api` |
-| Deployment and model logs | Streamed by deployment commands; retained at the log path printed by the launcher |
+| Deployment and model logs | Streamed by deployment commands; retained at the log path printed by the launcher. |
 | Run with live terminal output | `just deploy --detached=false` |
 | Verify the web app through the configured model | `just web test` |
-| Stop a foreground session | Ctrl-C in its terminal |
+| Stop a foreground session | Ctrl-C in its terminal. |
 | Stop native models and remove application containers | `just deploy down` |
 
 For native Rust runs, rendering inspection, and gateway settings, see
