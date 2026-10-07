@@ -1,0 +1,420 @@
+[
+  {
+    "name": "string",
+    "request": {
+      "input": "Hello"
+    }
+  },
+  {
+    "name": "unicode-whitespace",
+    "request": {
+      "input": "  Héllo\n世界 😀 é  "
+    }
+  },
+  {
+    "name": "empty-string",
+    "request": {
+      "input": ""
+    }
+  },
+  {
+    "name": "empty-items",
+    "request": {
+      "input": []
+    },
+    "template_may_reject": true
+  },
+  {
+    "name": "instructions",
+    "request": {
+      "instructions": "Be brief.",
+      "input": "Hello"
+    }
+  },
+  {
+    "name": "empty-instructions",
+    "request": {
+      "instructions": "",
+      "input": "Hello"
+    }
+  },
+  {
+    "name": "roles",
+    "request": {
+      "instructions": "Instructions",
+      "input": [
+        {
+          "role": "system",
+          "content": "System"
+        },
+        {
+          "role": "developer",
+          "content": "Developer"
+        },
+        {
+          "role": "user",
+          "content": "Question"
+        }
+      ]
+    },
+    "template_may_reject": true
+  },
+  {
+    "name": "developer-after-user",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "First"
+        },
+        {
+          "role": "developer",
+          "content": "Developer"
+        },
+        {
+          "role": "user",
+          "content": "Next"
+        }
+      ]
+    },
+    "template_may_reject": true
+  },
+  {
+    "name": "text-parts",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "first"
+            },
+            {
+              "type": "input_text",
+              "text": ""
+            },
+            {
+              "type": "input_text",
+              "text": " second\n"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "conversation",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "First"
+        },
+        {
+          "role": "assistant",
+          "content": "Reply"
+        },
+        {
+          "role": "user",
+          "content": "Next"
+        }
+      ]
+    }
+  },
+  {
+    "name": "adjacent-assistants",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "First"
+        },
+        {
+          "role": "assistant",
+          "content": "One"
+        },
+        {
+          "role": "assistant",
+          "content": "Two"
+        },
+        {
+          "role": "user",
+          "content": "Next"
+        }
+      ]
+    }
+  },
+  {
+    "name": "assistant-output-item",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "First"
+        },
+        {
+          "type": "message",
+          "id": "msg_1",
+          "role": "assistant",
+          "status": "completed",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Answer",
+              "annotations": [],
+              "logprobs": []
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": "Next"
+        }
+      ]
+    }
+  },
+  {
+    "name": "tool-definition",
+    "request": {
+      "input": "Check",
+      "tools": [
+        {
+          "type": "function",
+          "name": "clock",
+          "description": "Get time.",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "tool-none",
+    "request": {
+      "input": "Check",
+      "tool_choice": "none",
+      "tools": [
+        {
+          "type": "function",
+          "name": "clock",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "tool-optional-fields",
+    "request": {
+      "input": "Check",
+      "tools": [
+        {
+          "type": "function",
+          "name": "clock",
+          "description": "",
+          "parameters": null,
+          "strict": false,
+          "defer_loading": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "tool-schema-order",
+    "request": {
+      "input": "Check",
+      "tools": [
+        {
+          "type": "function",
+          "name": "lookup",
+          "parameters": {
+            "required": [
+              "city"
+            ],
+            "properties": {
+              "city": {
+                "description": "A city",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "strict": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "call-and-result",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "Check"
+        },
+        {
+          "type": "function_call",
+          "call_id": "call_1",
+          "name": "clock",
+          "arguments": "{}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_1",
+          "output": "10:00"
+        }
+      ]
+    }
+  },
+  {
+    "name": "parallel-calls",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "Check"
+        },
+        {
+          "type": "function_call",
+          "call_id": "call_1",
+          "name": "clock",
+          "arguments": "{}"
+        },
+        {
+          "type": "function_call",
+          "call_id": "call_2",
+          "name": "clock",
+          "arguments": "{\"zone\":\"UTC\"}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_1",
+          "output": "10:00"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_2",
+          "output": "11:00"
+        }
+      ]
+    },
+    "template_may_reject": true
+  },
+  {
+    "name": "assistant-and-call",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "Check"
+        },
+        {
+          "role": "assistant",
+          "content": "Checking."
+        },
+        {
+          "type": "function_call",
+          "call_id": "call_1",
+          "name": "clock",
+          "arguments": "{}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_1",
+          "output": "10:00"
+        }
+      ]
+    }
+  },
+  {
+    "name": "reasoning-history",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "Question"
+        },
+        {
+          "type": "reasoning",
+          "id": "rs_1",
+          "summary": [],
+          "content": [
+            {
+              "type": "reasoning_text",
+              "text": "Think."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "id": "msg_1",
+          "role": "assistant",
+          "status": "completed",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Answer.",
+              "annotations": [],
+              "logprobs": []
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": "Next"
+        }
+      ]
+    }
+  },
+  {
+    "name": "reasoning-summary",
+    "request": {
+      "input": [
+        {
+          "role": "user",
+          "content": "Question"
+        },
+        {
+          "type": "reasoning",
+          "id": "rs_1",
+          "summary": [
+            {
+              "type": "summary_text",
+              "text": "Summary."
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": "Answer"
+        },
+        {
+          "role": "user",
+          "content": "Next"
+        }
+      ]
+    }
+  },
+  {
+    "name": "sampling-and-output-format",
+    "request": {
+      "input": "Hello",
+      "temperature": 0,
+      "top_p": 0.9,
+      "max_output_tokens": 32,
+      "stream": true,
+      "text": {
+        "format": {
+          "type": "json_object"
+        }
+      },
+      "metadata": {
+        "trace": "fixture"
+      }
+    }
+  }
+]

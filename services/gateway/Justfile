@@ -11,6 +11,11 @@ build:
 test:
     cargo nextest run --package infergate --all-targets --locked
 
+# Compare local preparation with native vLLM preprocessing of the forwarded request.
+[positional-arguments]
+parity *args:
+    uv run --locked --project ../../tools/deploy ../../tools/parity/verify.py "$@"
+
 # Build the gateway image using the repository root as the build context.
 docker:
     docker build --file Dockerfile --tag infergate:local ../..
