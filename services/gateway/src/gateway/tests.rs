@@ -477,7 +477,7 @@ async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
-    let mock = Router::new().fallback(any(move |uri: Uri, body: Bytes| {
+    let mock = Router::new().fallback(any(move |uri: Uri, headers: HeaderMap, body: Bytes| {
         let observed = Arc::clone(&observed);
         async move {
             assert_eq!(
@@ -485,8 +485,12 @@ async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
                 "/v1/responses",
                 "preparation must not make render calls"
             );
+            assert_eq!(headers[header::CONTENT_LENGTH], body.len().to_string());
             observed.fetch_add(1, Ordering::SeqCst);
-            ([("content-type", "application/json")], body)
+            (
+                [(header::CONTENT_TYPE, headers[header::CONTENT_TYPE].clone())],
+                body,
+            )
         }
     }));
     let (upstream, mock_task) = serve(mock).await;
@@ -503,15 +507,26 @@ async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
     ))
     .await;
     let request = serde_json::json!({"model":"fixture", "input":"Keep the original", "instructions":"System", "stream":true});
-    let response = Client::new()
-        .post(format!("{gateway}/v1/responses"))
-        .json(&request)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.json::<serde_json::Value>().await.unwrap(), request);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // Serialization removes whitespace and omitted nullable fields, so the
+    // outbound Content-Length must describe the encoded body, not the original.
+    let raw_request = r#"{ "model": "fixture", "input": "Keep the original", "instructions": "System", "stream": true, "metadata": null }"#;
+    for (connection, content_type) in [
+        ("keep-alive", "application/json; charset=utf-8"),
+        ("content-type", "application/json"),
+    ] {
+        let response = Client::new()
+            .post(format!("{gateway}/v1/responses"))
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(header::CONNECTION, connection)
+            .body(raw_request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+        assert_eq!(response.json::<serde_json::Value>().await.unwrap(), request);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     let invalid = Client::new()
         .post(format!("{gateway}/v1/responses"))
         .json(&serde_json::json!({"model":"other", "input":"private"}))
@@ -520,9 +535,45 @@ async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
         .unwrap();
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     assert!(!invalid.text().await.unwrap().contains("private"));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     task.abort();
     mock_task.abort();
+}
+
+#[tokio::test]
+async fn outbound_json_and_http_build_failures_share_a_safe_server_error() {
+    use crate::inference::InputError;
+    use axum::response::IntoResponse;
+    use std::error::Error;
+
+    let serialization = InputError::from(<serde_json::Error as serde::ser::Error>::custom(
+        "private request data",
+    ));
+    assert!(serialization.source().unwrap().is::<serde_json::Error>());
+    let construction = InputError::from(
+        Client::new()
+            .post("http://localhost")
+            .header("x-test", "private request data\n")
+            .build()
+            .unwrap_err(),
+    );
+    assert!(construction.source().unwrap().is::<reqwest::Error>());
+
+    for error in [serialization, construction] {
+        assert!(!format!("{error:?}").contains("private request data"));
+        assert!(!error.to_string().contains("private request data"));
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(
+            body["error"]["message"],
+            "The gateway could not build the backend request."
+        );
+    }
 }
 
 #[tokio::test]

@@ -118,7 +118,7 @@ impl IntoResponse for InputError {
                     &self.to_string(),
                 );
             }
-            Self::PreparationFailed(_) => {
+            Self::PreparationFailed(_) | Self::RequestBuildFailed(_) => {
                 return responses_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "server_error",
@@ -126,13 +126,6 @@ impl IntoResponse for InputError {
                 );
             }
             Self::NoBackend => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Backend(error) if error.is_builder() => {
-                return responses_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "The gateway could not build the backend request.",
-                );
-            }
             Self::Backend(error) => backend_error_status(error),
         };
         responses_error(
