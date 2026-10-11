@@ -6,3 +6,7 @@ localhost-key.der: unencrypted PKCS#8 private key for localhost.der.
 
 The CA is trusted only by the test client. Production uses the bundled WebPKI roots.
 The absent IP SAN deliberately lets tests check rejection of a hostname mismatch.
+
+kv-events/*.msgpack are encoded by the locked native event types from the
+input-string unicode-whitespace parity case. Regenerate them with:
+  uv run --locked --project tools/deploy python tools/parity/event_fixtures.py

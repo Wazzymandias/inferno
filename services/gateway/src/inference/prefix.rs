@@ -1,4 +1,4 @@
-//! vLLM 0.31 SHA-256 over canonical CBOR: (parent, token tuple, extra keys).
+//! SHA-256 over canonical CBOR: (parent, token tuple, extra keys).
 //! Only complete blocks participate; each invocation starts a fresh chain.
 
 use std::num::NonZeroUsize;
@@ -10,12 +10,18 @@ use super::{InputError, hugging_face::EncodedInput};
 
 pub(crate) type BlockHash = [u8; 32];
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PrefixConfig {
     algorithm: String,
     block_size: NonZeroUsize,
     initial_parent: BlockHash,
+}
+
+impl PrefixConfig {
+    pub(super) const fn block_size(&self) -> usize {
+        self.block_size.get()
+    }
 }
 
 #[derive(Debug)]
@@ -25,6 +31,10 @@ pub(super) struct PrefixHasher {
 }
 
 impl PrefixHasher {
+    pub(crate) const fn block_size(&self) -> usize {
+        self.block_size.get()
+    }
+
     pub(super) fn new(config: PrefixConfig) -> Result<Self, InputError> {
         if config.algorithm != "sha256_cbor" {
             return Err(InputError::new(

@@ -2,42 +2,49 @@
 
 use std::sync::Arc;
 
-use axum::http::HeaderMap;
+use axum::{
+    http::{HeaderMap, HeaderValue, Method, header},
+    response::Response,
+};
 
-use super::Gateway;
-use crate::inference::{CreateResponseRequest, InputError, ModelInput};
+use super::{Gateway, routes::upstream_response};
+use crate::inference;
+use crate::inference::{InputError, ModelInput};
 
 impl Gateway {
+    /// Forward a validated request using [`Gateway::select`] for backend choice.
+    /// Retain the serialized body while preparation owns the parsed request;
+    /// preparation failures prevent dispatch even if serialization also failed.
     pub(super) async fn create_response(
         &self,
         query: Option<&str>,
-        headers: HeaderMap,
-        request: CreateResponseRequest,
-    ) -> Result<reqwest::Response, InputError> {
-        let (request, input) = self.prepare_input(request).await?;
-        let backend = self.select(&input).ok_or(InputError::NoBackend)?;
+        mut headers: HeaderMap,
+        request: inference::CreateResponseRequest,
+    ) -> Result<Response, InputError> {
+        let body = serde_json::to_vec(&request);
+        let input = self.prepare_input(request).await?;
+        let lease = self.select(Some(&input)).ok_or(InputError::NoBackend)?;
+        headers
+            .entry(header::CONTENT_TYPE)
+            .or_insert(HeaderValue::from_static("application/json"));
 
-        Ok(backend
-            .client
-            .post(backend.url("responses", query))
+        let response = lease
+            .request(Method::POST, "responses", query)
             .headers(headers)
-            .json(&request)
+            .body(body?)
             .send()
-            .await?)
+            .await?;
+        Ok(upstream_response(response, lease))
     }
 
-    /// Run CPU preparation outside the async executor, moving the request
-    /// through the worker and returning it intact for backend dispatch.
-    /// The worker owns its captures because it can outlive a cancelled handler.
+    /// Tokenize and hash [`inference::ModelInput`] on a blocking worker.
+    /// The worker consumes the parsed request and
+    /// can finish after its awaiting handler is cancelled.
     async fn prepare_input(
         &self,
-        request: CreateResponseRequest,
-    ) -> Result<(CreateResponseRequest, ModelInput), InputError> {
+        request: inference::CreateResponseRequest,
+    ) -> Result<ModelInput, InputError> {
         let processor = Arc::clone(&self.processor);
-        tokio::task::spawn_blocking(move || {
-            let input = processor.prepare(&request)?;
-            Ok((request, input))
-        })
-        .await?
+        tokio::task::spawn_blocking(move || processor.prepare(&request)).await?
     }
 }

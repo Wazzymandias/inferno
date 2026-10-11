@@ -13,7 +13,7 @@ use super::{
     Gateway,
     routes::{app, strip_transport_headers},
 };
-use crate::backend::{Backend, Pool};
+use crate::backend::Backend;
 use axum::http::HeaderValue;
 use reqwest::{Client, Url};
 
@@ -129,7 +129,7 @@ async fn preserves_backend_prefix_query_body_and_error_response() {
         ),
     );
     let (upstream, mock_task) = serve(mock).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(
         Url::parse(&format!("{upstream}/engines/v1")).unwrap(),
         Duration::from_secs(5),
@@ -182,7 +182,7 @@ async fn streams_first_event_before_backend_finishes() {
         }),
     );
     let (upstream, mock_task) = serve(mock).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(
         Url::parse(&format!("{upstream}/v1")).unwrap(),
         Duration::from_secs(5),
@@ -241,7 +241,7 @@ async fn times_out_an_unfinished_backend_stream() {
         }),
     );
     let (upstream, mock_task) = serve(mock).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(
         Url::parse(&format!("{upstream}/v1")).unwrap(),
         Duration::from_secs(1),
@@ -271,11 +271,11 @@ async fn times_out_an_unfinished_backend_stream() {
 }
 
 #[tokio::test]
-async fn distinguishes_liveness_backend_failure_and_oversized_request() {
+async fn keeps_health_and_readiness_available_during_backend_failure() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(
         Url::parse(&format!("http://{address}/v1")).unwrap(),
         Duration::from_secs(1),
@@ -290,7 +290,7 @@ async fn distinguishes_liveness_backend_failure_and_oversized_request() {
     let client = Client::new();
     for (path, expected) in [
         ("/healthz", StatusCode::OK),
-        ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
+        ("/readyz", StatusCode::OK),
         ("/v1/models", StatusCode::BAD_GATEWAY),
     ] {
         let response = client.get(format!("{gateway}{path}")).send().await.unwrap();
@@ -348,7 +348,7 @@ async fn shutdown_deadline_bounds_an_active_request() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (upstream, mock_task) = serve(router).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(Url::parse(&upstream).unwrap(), Duration::from_secs(5), None)
         .unwrap();
     let mut gateway = Gateway::new(address.ip(), address.port(), processor()).with_pool(pool);
@@ -372,6 +372,23 @@ async fn shutdown_deadline_bounds_an_active_request() {
 }
 
 #[tokio::test]
+async fn rejects_missing_or_empty_pool_before_binding() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    for pool in [None, Some(super::pool::tests::pool(0))] {
+        let mut gateway = Gateway::new(address.ip(), address.port(), processor());
+        if let Some(pool) = pool {
+            gateway = gateway.with_pool(pool);
+        }
+        let error = gateway
+            .serve(|_| async { panic!("invalid configuration must not start signal handling") })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
 async fn idle_server_shuts_down_cleanly() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -390,7 +407,7 @@ async fn idle_server_shuts_down_cleanly() {
 
 fn processor() -> crate::inference::InputProcessor {
     crate::inference::InputProcessor::load(
-        crate::inference::ModelConfig::parse(
+        &crate::inference::ModelConfig::parse(
             include_bytes!("../testdata/input-string/model-config.json"),
             "fixture",
         )
@@ -400,11 +417,86 @@ fn processor() -> crate::inference::InputProcessor {
 }
 
 #[tokio::test]
+async fn streaming_load_lasts_until_completion_cancellation_or_body_error() {
+    let mock = Router::new().fallback(any(|uri: Uri| async move {
+        if uri.query() != Some("stream") {
+            return Body::from("done");
+        }
+        Body::from_stream(futures_util::stream::unfold(true, |first| async move {
+            if first {
+                Some((
+                    Ok::<_, std::io::Error>(Bytes::from_static(b"data: first\n\n")),
+                    false,
+                ))
+            } else {
+                std::future::pending().await
+            }
+        }))
+    }));
+    let (upstream, task) = serve(mock).await;
+    let pool = super::pool::tests::pool(0);
+    for replica in ["zero", "one"] {
+        pool.add(
+            format!("{upstream}/{replica}/v1").parse().unwrap(),
+            Duration::from_secs(1),
+            None,
+        )
+        .unwrap();
+    }
+    let gateway = Gateway::new("127.0.0.1".parse().unwrap(), 0, processor()).with_pool(pool);
+    let request = || {
+        serde_json::from_value(
+            serde_json::json!({"model":"fixture", "input":"hello", "stream":true}),
+        )
+        .unwrap()
+    };
+    let input = gateway.processor.prepare(&request()).unwrap();
+    let selected = || {
+        gateway
+            .select(Some(&input))
+            .unwrap()
+            .request(Method::POST, "responses", None)
+            .build()
+            .unwrap()
+            .url()
+            .path()
+            .to_owned()
+    };
+    let response = gateway
+        .create_response(Some("stream"), HeaderMap::new(), request())
+        .await
+        .unwrap();
+    assert_eq!(selected(), "/one/v1/responses");
+    drop(response);
+    assert_eq!(selected(), "/zero/v1/responses");
+    let response = gateway
+        .create_response(None, HeaderMap::new(), request())
+        .await
+        .unwrap();
+    assert_eq!(selected(), "/one/v1/responses");
+    axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(selected(), "/zero/v1/responses");
+    let response = gateway
+        .create_response(Some("stream"), HeaderMap::new(), request())
+        .await
+        .unwrap();
+    assert!(
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .is_err()
+    );
+    assert_eq!(selected(), "/zero/v1/responses");
+    task.abort();
+}
+
+#[tokio::test]
 async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
-    let mock = Router::new().fallback(any(move |uri: Uri, body: Bytes| {
+    let mock = Router::new().fallback(any(move |uri: Uri, headers: HeaderMap, body: Bytes| {
         let observed = Arc::clone(&observed);
         async move {
             assert_eq!(
@@ -412,12 +504,16 @@ async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
                 "/v1/responses",
                 "preparation must not make render calls"
             );
+            assert_eq!(headers[header::CONTENT_LENGTH], body.len().to_string());
             observed.fetch_add(1, Ordering::SeqCst);
-            ([("content-type", "application/json")], body)
+            (
+                [(header::CONTENT_TYPE, headers[header::CONTENT_TYPE].clone())],
+                body,
+            )
         }
     }));
     let (upstream, mock_task) = serve(mock).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(
         Url::parse(&format!("{upstream}/v1")).unwrap(),
         Duration::from_secs(5),
@@ -430,15 +526,26 @@ async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
     ))
     .await;
     let request = serde_json::json!({"model":"fixture", "input":"Keep the original", "instructions":"System", "stream":true});
-    let response = Client::new()
-        .post(format!("{gateway}/v1/responses"))
-        .json(&request)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.json::<serde_json::Value>().await.unwrap(), request);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // Serialization removes whitespace and omitted nullable fields, so the
+    // outbound Content-Length must describe the encoded body, not the original.
+    let raw_request = r#"{ "model": "fixture", "input": "Keep the original", "instructions": "System", "stream": true, "metadata": null }"#;
+    for (connection, content_type) in [
+        ("keep-alive", "application/json; charset=utf-8"),
+        ("content-type", "application/json"),
+    ] {
+        let response = Client::new()
+            .post(format!("{gateway}/v1/responses"))
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(header::CONNECTION, connection)
+            .body(raw_request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+        assert_eq!(response.json::<serde_json::Value>().await.unwrap(), request);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     let invalid = Client::new()
         .post(format!("{gateway}/v1/responses"))
         .json(&serde_json::json!({"model":"other", "input":"private"}))
@@ -447,9 +554,46 @@ async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
         .unwrap();
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     assert!(!invalid.text().await.unwrap().contains("private"));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     task.abort();
     mock_task.abort();
+}
+
+#[tokio::test]
+async fn outbound_json_and_http_build_failures_share_a_safe_server_error() {
+    use crate::inference::InputError;
+    use axum::response::IntoResponse;
+    use std::error::Error;
+
+    crate::backend::install_crypto_provider();
+    let serialization = InputError::from(<serde_json::Error as serde::ser::Error>::custom(
+        "private request data",
+    ));
+    assert!(serialization.source().unwrap().is::<serde_json::Error>());
+    let construction = InputError::from(
+        Client::new()
+            .post("http://localhost")
+            .header("x-test", "private request data\n")
+            .build()
+            .unwrap_err(),
+    );
+    assert!(construction.source().unwrap().is::<reqwest::Error>());
+
+    for error in [serialization, construction] {
+        assert!(!format!("{error:?}").contains("private request data"));
+        assert!(!error.to_string().contains("private request data"));
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(
+            body["error"]["message"],
+            "The gateway could not build the backend request."
+        );
+    }
 }
 
 #[tokio::test]

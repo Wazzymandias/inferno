@@ -1,6 +1,11 @@
 //! HTTP routing and streaming proxy behavior.
 
-use std::sync::Arc;
+use super::RequestLease;
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use super::Gateway;
 use crate::inference::{CreateResponseRequest, InputError};
@@ -32,14 +37,10 @@ pub(super) fn app(gateway: Arc<Gateway>, body_limit: usize) -> Router {
         .with_state(gateway)
 }
 
-async fn ready(State(gateway): State<Arc<Gateway>>) -> StatusCode {
-    let Some(backend) = gateway.pool.first() else {
-        return StatusCode::SERVICE_UNAVAILABLE;
-    };
-    match backend.client.get(backend.url("models", None)).send().await {
-        Ok(response) if response.status().is_success() => StatusCode::OK,
-        _ => StatusCode::SERVICE_UNAVAILABLE,
-    }
+/// Report that the gateway is serving HTTP. [`super::Gateway::serve`] rejects
+/// an empty pool before serving; backend outages do not change this response.
+async fn ready() -> StatusCode {
+    StatusCode::OK
 }
 
 async fn forward(
@@ -49,7 +50,7 @@ async fn forward(
     mut headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(backend) = gateway.pool.first() else {
+    let Some(lease) = gateway.select(None) else {
         return backend_unavailable(StatusCode::BAD_GATEWAY);
     };
     let path = uri
@@ -58,9 +59,8 @@ async fn forward(
         .expect("route has /v1/ prefix");
     strip_transport_headers(&mut headers);
 
-    let response = match backend
-        .client
-        .request(method, backend.url(path, uri.query()))
+    let response = match lease
+        .request(method, path, uri.query())
         .headers(headers)
         .body(body)
         .send()
@@ -72,7 +72,7 @@ async fn forward(
         }
     };
 
-    upstream_response(response)
+    upstream_response(response, lease)
 }
 
 async fn create_response(
@@ -83,10 +83,7 @@ async fn create_response(
 ) -> Result<Response, InputError> {
     let Json(request) = request?;
     strip_transport_headers(&mut headers);
-    let response = gateway
-        .create_response(uri.query(), headers, request)
-        .await?;
-    Ok(upstream_response(response))
+    gateway.create_response(uri.query(), headers, request).await
 }
 
 impl IntoResponse for InputError {
@@ -116,7 +113,7 @@ impl IntoResponse for InputError {
                     &self.to_string(),
                 );
             }
-            Self::PreparationFailed(_) => {
+            Self::PreparationFailed(_) | Self::RequestBuildFailed(_) => {
                 return responses_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "server_error",
@@ -124,13 +121,6 @@ impl IntoResponse for InputError {
                 );
             }
             Self::NoBackend => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Backend(error) if error.is_builder() => {
-                return responses_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "The gateway could not build the backend request.",
-                );
-            }
             Self::Backend(error) => backend_error_status(error),
         };
         responses_error(
@@ -168,15 +158,46 @@ fn backend_error_status(error: reqwest::Error) -> StatusCode {
     }
 }
 
-fn upstream_response(response: reqwest::Response) -> Response {
+pub(super) fn upstream_response(response: reqwest::Response, lease: RequestLease) -> Response {
     let status = response.status();
     let mut headers = response.headers().clone();
     strip_transport_headers(&mut headers);
     // Forward chunks as they arrive so token streaming remains incremental.
-    let mut outgoing = Response::new(Body::new(reqwest::Body::from(response)));
+    let mut outgoing = Response::new(Body::new(UpstreamBody {
+        body: reqwest::Body::from(response),
+        lease: Some(lease),
+    }));
     *outgoing.status_mut() = status;
     *outgoing.headers_mut() = headers;
     outgoing
+}
+
+struct UpstreamBody {
+    body: reqwest::Body,
+    lease: Option<RequestLease>,
+}
+
+impl http_body::Body for UpstreamBody {
+    type Data = Bytes;
+    type Error = reqwest::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        let frame = Pin::new(&mut self.body).poll_frame(cx);
+        if matches!(frame, Poll::Ready(None | Some(Err(_)))) || self.body.is_end_stream() {
+            self.lease.take();
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
 }
 
 fn backend_unavailable(status: StatusCode) -> Response {

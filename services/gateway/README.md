@@ -42,8 +42,9 @@ Invalid configuration fails before the listener opens.
 | `--model` | `INFERENCE_MODEL` | Required; both commands |
 | Environment only | `INFERENCE_API_KEY` | Empty; optional backend bearer token |
 | Environment only | `XDG_CACHE_HOME` | `$HOME/.cache`; Compose supplies `/var/cache` |
-| `--inference-endpoint` | `INFERENCE_ENDPOINT` | Required; both commands |
+| `--inference-endpoint` | `INFERENCE_ENDPOINT` | Required; comma-separated replicas or repeated flag for `serve`, one endpoint for `render` |
 | `--inference-timeout-seconds` | `INFERENCE_TIMEOUT_SECONDS` | `300` |
+| `--routing-load-penalty` | `ROUTING_LOAD_PENALTY` | `256` cached tokens per active request; positive |
 | `--max-request-bytes` | `MAX_REQUEST_BYTES` | `1048576` |
 | `--shutdown-timeout-seconds` | `SHUTDOWN_TIMEOUT_SECONDS` | `5` |
 
@@ -78,8 +79,10 @@ The configured native vLLM backend must support the
 It owns response storage, background jobs, and tool execution. Create requests
 must include their history inline so local preparation can reproduce the input.
 The existing `/v1` forwarding route also sends retrieval, deletion, cancellation,
-and input-item requests to the backend. The gateway currently selects the first
-backend in pool order. It does not distribute requests between backends.
+and input-item requests to the backend. Create requests use prefix residency and active-request load to select a replica.
+Other forwarded requests use active-request load. Backend-local stored response IDs
+require a single replica or a shared response store; the gateway does not maintain
+response ownership or session state.
 
 The gateway returns JSON error objects for invalid create requests and backend
 connection failures. The configured body limit and timeout also apply to this
@@ -100,8 +103,8 @@ model cache or runtime logs.
 
 ## Local input preparation
 
-Select the served model and backend endpoint. Startup discovers their resolved
-configuration and loads `InputProcessor` once. Each `prepare()` call
+Select the served model and backend endpoint. Startup discovers every replica's resolved configuration, checks that model preparation and hash policy agree,
+and loads `InputProcessor` once. Each `prepare()` call
 validates a borrowed request, renders and tokenizes locally, computes prefix
 hashes, and returns a completed `ModelInput`:
 
@@ -111,8 +114,8 @@ let tokens = input.tokens();
 let hashes = input.prefix_hashes();
 ```
 
-`InputProcessor` owns the reusable encoder and hash policy. `ModelInput` owns only
-its tokens and hashes; accessors perform no work and borrow neither processor nor
+`InputProcessor` owns the reusable encoder and hash policy. `ModelInput` owns
+its tokens, hashes, and hash block size; accessors perform no work and borrow neither processor nor
 request. The handler retains the original typed request for forwarding. CPU work
 runs on Tokio's blocking pool. `RenderInput` is private to `HuggingFaceEncoder`.
 Generic proxy and health routes do not manufacture model input.
@@ -176,6 +179,8 @@ canonical encoding.
 For a separately launched vLLM 0.31.0 server, put this repository on `PYTHONPATH`
 and include the same integration:
 
+Set `VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=0` in the server environment, then add:
+
 ```sh
 --enable-prefix-caching \
 --prefix-caching-hash-algo sha256_cbor \
@@ -193,7 +198,8 @@ endpoints for your deployment. No port relationship to HTTP is required.
 `GET /v1/inferno/kv-events?model=...` on the native server returns the active
 instance and resolved publisher sources under native API authentication.
 Rediscover after a restart. Startup requires prefix caching and a ZMQ publisher
-with replay; native configurations that disable prefix caching fail startup.
+with replay and full-byte hashes; configurations that disable prefix caching or
+use integer event hashes fail startup.
 
 Then configure only its endpoint, served model, and credentials if required. The
 integration follows the locked native version; backend upgrades require checking
@@ -211,8 +217,51 @@ continuations, forced tool selection, unsupported tool execution, and time-depen
 cases return errors; there is no approximate-token or RPC fallback. Adapter, encoder-decoder, and
 prompt-embedding configurations fail during native startup.
 
-Selection still uses the first backend. Preparing hashes does not yet implement
-cache-aware routing or cache-state discovery.
+### Prefix routing
+
+`Pool::rank` owns selection and reserves an active request under the same lock.
+Its score is `cached_tokens - active_requests * ROUTING_LOAD_PENALTY`.
+Equal scores prefer fewer active requests, then configuration order. A response
+body owns the reservation until completion, error, timeout, or cancellation.
+This load count is local to each gateway instance.
+
+Configure replicas with `INFERENCE_ENDPOINT=http://replica-a/v1,http://replica-b/v1`
+or repeat `--inference-endpoint`. Each endpoint must identify a distinct replica
+with matching tokenizer, templates, served models, and hash policy. The deployment
+launcher starts one local replica; point Compose at separately managed replicas
+for a larger pool. No event port is derived from an HTTP port.
+
+`Gateway::serve` runs HTTP serving, event subscriptions, and signal handling
+concurrently. The cache index is disposable process memory. The `events/vllm`
+adapter converts vLLM discovery and wire events into backend-neutral cache
+updates; residency and ranking live under `backend`.
+
+Cache group sizes and required history come from the native cache managers.
+`required_blocks` is null for full history, a positive count for a sliding
+window, and one for a state checkpoint. Every group must satisfy its requirement
+at the same prefix boundary; taking the minimum of unrelated checkpoints would
+claim a prefix the backend cannot reuse. Full-history groups still stop at a
+missing ancestor. Only complete physical blocks receive credit, and CPU or
+remote storage events cannot claim local GPU residency. Unsupported lookup
+policies, including speculative decoding, fail discovery at native startup.
+
+Subscriptions connect to discovered addresses and consume topic, big-endian
+sequence, and MessagePack batch frames. Replay rebuilds the index before it
+becomes visible to routing. Gaps and disconnects invalidate only the affected
+replica's cache credit; unavailable or truncated history starts from empty
+residency. Eviction and clear events remove credit, and duplicate live frames
+already covered by replay are ignored. Reconnect rediscovers bound endpoints
+and validates model configuration; a changed model requires a gateway restart.
+The HTTP backend remains eligible while its cache is unknown.
+
+Regenerate adapter wire fixtures with the locked native types:
+
+```sh
+uv run --locked --project tools/deploy python tools/parity/event_fixtures.py
+```
+
+Tests cover hash parity, replica scoring, group alignment, eviction, replay gaps,
+disconnects, malformed frames, and streaming reservation lifetimes.
 
 The Rust suite checks committed token/hash fixtures generated by the locked native
 renderer, including both content formats, special tokens, Unicode, tools,

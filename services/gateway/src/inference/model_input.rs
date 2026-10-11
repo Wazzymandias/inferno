@@ -6,13 +6,19 @@ use super::prefix::BlockHash;
 pub(crate) struct ModelInput {
     tokens: Vec<u32>,
     prefix_hashes: Vec<BlockHash>,
+    block_size: usize,
 }
 
 impl ModelInput {
-    pub(super) const fn new(tokens: Vec<u32>, prefix_hashes: Vec<BlockHash>) -> Self {
+    pub(super) const fn new(
+        tokens: Vec<u32>,
+        prefix_hashes: Vec<BlockHash>,
+        block_size: usize,
+    ) -> Self {
         Self {
             tokens,
             prefix_hashes,
+            block_size,
         }
     }
 
@@ -22,6 +28,10 @@ impl ModelInput {
 
     pub(crate) fn prefix_hashes(&self) -> &[BlockHash] {
         &self.prefix_hashes
+    }
+
+    pub(crate) const fn block_size(&self) -> usize {
+        self.block_size
     }
 }
 

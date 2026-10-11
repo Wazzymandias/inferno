@@ -30,7 +30,7 @@ impl RenderCommand {
             self.api_key,
         )?;
         let config = inference::ModelConfig::for_inspection(&backend, &self.model).await?;
-        let processor = inference::InputProcessor::load(config)?;
+        let processor = inference::InputProcessor::load(&config)?;
         let request: inference::CreateResponseRequest = serde_json::from_reader(io::stdin().lock())
             .map_err(|error| {
                 inference::InputError::with_source(

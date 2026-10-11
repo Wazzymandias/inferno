@@ -48,7 +48,7 @@ class DeploymentTests(unittest.TestCase):
                 start.assert_not_called()
                 if build_error is not None:
                     raise build_error
-                return root / "tools/deploy/.venv/bin/vllm"
+                return serve_mlx.native_command(root)
 
             prepare = stack.enter_context(patch.object(serve_mlx, "prepare_native_environment", side_effect=build))
             run = stack.enter_context(patch.object(serve_mlx.subprocess, "run", side_effect=calls))
@@ -81,13 +81,14 @@ class DeploymentTests(unittest.TestCase):
     def test_foreground_passes_compose_configuration_to_both_processes(self):
         server, start, run, stop = self.launch()
         command = start.call_args.args[0]
-        self.assertEqual(command[1:3], ["serve", "example/model"])
+        self.assertEqual(command[1:5], ["-m", "vllm.entrypoints.cli.main", "serve", "example/model"])
         self.assertEqual(command[command.index("--served-model-name") + 1], "example/model")
         self.assertEqual(command[command.index("--port") + 1], "9000")
         self.assertEqual(command[-2:], ["--max-model-len", "2048"])
         self.assertNotIn("--detached=false", command)
         self.assertTrue(start.call_args.kwargs["start_new_session"])
         self.assertEqual(start.call_args.kwargs["env"]["VLLM_METAL_BUILD_FROM_SOURCE"], "1")
+        self.assertEqual(start.call_args.kwargs["env"]["VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES"], "0")
         self.assertEqual(run.call_args_list[0].args[0], ["docker", "compose", "config", "--environment"])
         self.assertTrue(run.call_args_list[0].kwargs["capture_output"])
         self.assertEqual(run.call_args_list[1].args[0], ["docker", "compose", "up", "--wait"])
@@ -108,7 +109,7 @@ class DeploymentTests(unittest.TestCase):
         for flags in (("-d=false",), ("--detached", "false"), ("-d", "false")):
             with self.subTest(flags=flags):
                 _, start, _, _ = self.launch(flags)
-                self.assertEqual(start.call_args.args[0][1], "serve")
+                self.assertIn("serve", start.call_args.args[0])
                 self.assertTrue(start.call_args.kwargs["start_new_session"])
                 self.assertNotIn("-d", start.call_args.args[0])
                 self.assertNotIn("--detached", start.call_args.args[0])
@@ -214,7 +215,7 @@ class DeploymentTests(unittest.TestCase):
     def test_arguments_override_the_model_and_port_for_both_processes(self):
         _, start, run, _ = self.launch(["--model", "another/model", "--port", "9001", "--", "--max-num-seqs", "2"])
         command = start.call_args.args[0]
-        self.assertEqual(command[2], "another/model")
+        self.assertEqual(command[command.index("serve") + 1], "another/model")
         self.assertEqual(command[command.index("--port") + 1], "9001")
         self.assertEqual(command[-2:], ["--max-num-seqs", "2"])
         environment = run.call_args_list[1].kwargs["env"]
@@ -264,6 +265,38 @@ class DeploymentTests(unittest.TestCase):
             with self.assertRaises(argparse.ArgumentTypeError):
                 serve_mlx.port_number(value)
         self.assertEqual(serve_mlx.port_number("9000"), 9000)
+
+
+class NativeCommandTests(unittest.TestCase):
+    def test_checkout_can_move_without_rewriting_installed_entrypoints(self):
+        import venv
+
+        with tempfile.TemporaryDirectory() as directory:
+            original = Path(directory) / "original"
+            environment = original / "tools/deploy/.venv"
+            venv.EnvBuilder(symlinks=True).create(environment)
+            command = serve_mlx.native_command(original)
+            packages = Path(subprocess.check_output(
+                [command[0], "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], text=True,
+            ).strip())
+            module = packages / "vllm/entrypoints/cli/main.py"
+            module.parent.mkdir(parents=True)
+            module.write_text("import json, sys; print(json.dumps(sys.argv[1:]))")
+            entrypoint = environment / "bin/vllm"
+            entrypoint.write_text(
+                f"#!{command[0]}\n"
+                "import runpy; runpy.run_module('vllm.entrypoints.cli.main', run_name='__main__')\n"
+            )
+            entrypoint.chmod(0o755)
+            result = subprocess.check_output([str(entrypoint), "serve", "fixture"], text=True)
+            self.assertEqual(json.loads(result), ["serve", "fixture"])
+            moved = original.with_name("relocated checkout")
+            original.rename(moved)
+            stale = moved / "tools/deploy/.venv/bin/vllm"
+            with self.assertRaises(FileNotFoundError):
+                subprocess.run([str(stale)], check=True)
+            result = subprocess.check_output(serve_mlx.native_command(moved) + ["serve", "fixture"], text=True)
+            self.assertEqual(json.loads(result), ["serve", "fixture"])
 
 
 class LogStreamTests(unittest.TestCase):
@@ -357,7 +390,7 @@ SESSION_DRIVER = textwrap.dedent(r"""
         server = Mock(pid=12345)
         server.poll.return_value = None
         server.wait.side_effect = wait_for_server
-        patches.enter_context(patch.object(serve_mlx, "prepare_native_environment", return_value=Path("vllm")))
+        patches.enter_context(patch.object(serve_mlx, "prepare_native_environment", return_value=serve_mlx.native_command(root)))
         patches.enter_context(patch.object(serve_mlx, "wait_until_ready", side_effect=load_model))
         patches.enter_context(patch.object(serve_mlx.socket, "socket"))
         patches.enter_context(patch.object(serve_mlx.subprocess, "Popen", return_value=server))

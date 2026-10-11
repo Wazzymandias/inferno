@@ -105,7 +105,7 @@ fn rejects_unresolved_or_unimplemented_inputs_without_returning_approximate_toke
 
 fn processor(format: &str) -> InputProcessor {
     let bytes = std::fs::read(directory(format).join("model-config.json")).unwrap();
-    InputProcessor::load(ModelConfig::parse(&bytes, "fixture").unwrap()).unwrap()
+    InputProcessor::load(&ModelConfig::parse(&bytes, "fixture").unwrap()).unwrap()
 }
 
 #[test]
@@ -113,5 +113,5 @@ fn rejects_modified_tokenizer_assets() {
     let bytes = std::fs::read(directory("string").join("model-config.json")).unwrap();
     let mut config = ModelConfig::parse(&bytes, "fixture").unwrap();
     config.tokenizer_json.push(' ');
-    assert!(InputProcessor::load(config).is_err());
+    assert!(InputProcessor::load(&config).is_err());
 }

@@ -53,16 +53,35 @@ fn inference_endpoint() -> impl Parser<Url> {
     bpaf::long("inference-endpoint")
         .env("INFERENCE_ENDPOINT")
         .help("OpenAI-compatible HTTP(S) API endpoint (required)")
-        .argument::<Url>("URL")
-        .guard(
-            |url| {
-                matches!(url.scheme(), "http" | "https")
-                    && url.host_str().is_some()
-                    && url.query().is_none()
-                    && url.fragment().is_none()
-            },
-            "inference endpoint must be HTTP(S), without a query or fragment",
-        )
+        .argument::<String>("URL")
+        .parse(|value| parse_endpoint(&value))
+}
+
+fn inference_endpoints() -> impl Parser<Vec<Url>> {
+    bpaf::long("inference-endpoint")
+        .env("INFERENCE_ENDPOINT")
+        .help("Comma-separated HTTP(S) replica endpoints; may be repeated")
+        .argument::<String>("URL[,URL...]")
+        .parse(|value| -> Result<Vec<Url>, &'static str> {
+            value
+                .split(',')
+                .map(|value| parse_endpoint(value.trim()))
+                .collect()
+        })
+        .some("at least one inference endpoint is required")
+        .map(|groups| groups.into_iter().flatten().collect())
+}
+
+fn parse_endpoint(value: &str) -> Result<Url, &'static str> {
+    let url: Url = value.parse().map_err(|_| "invalid inference endpoint")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("inference endpoint must be HTTP(S), without a query or fragment");
+    }
+    Ok(url)
 }
 
 // Environment-only credentials stay out of process arguments and Debug output.
@@ -97,5 +116,35 @@ mod tests {
     #[test]
     fn parser_invariants() {
         options().check_invariants(false);
+    }
+
+    #[test]
+    fn replica_lists_share_endpoint_validation_with_render() {
+        use bpaf::Parser;
+        let parser = super::inference_endpoints().to_options();
+        let endpoints = parser
+            .run_inner(&[
+                "--inference-endpoint",
+                "http://a/v1,http://b/api",
+                "--inference-endpoint",
+                "https://c/v1",
+            ])
+            .unwrap();
+        assert_eq!(endpoints.len(), 3);
+        for invalid in [
+            "",
+            "http://a/v1,",
+            "http://a/v1?secret=x",
+            "file:///private",
+            "http://a/#fragment",
+        ] {
+            assert!(
+                parser
+                    .run_inner(bpaf::Args::from(
+                        ["--inference-endpoint", invalid].as_slice()
+                    ))
+                    .is_err()
+            );
+        }
     }
 }
