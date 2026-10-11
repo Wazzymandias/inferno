@@ -1,6 +1,6 @@
 //! HTTP routing and streaming proxy behavior.
 
-use crate::backend::RequestLease;
+use super::RequestLease;
 use std::{
     pin::Pin,
     sync::Arc,
@@ -37,14 +37,10 @@ pub(super) fn app(gateway: Arc<Gateway>, body_limit: usize) -> Router {
         .with_state(gateway)
 }
 
-async fn ready(State(gateway): State<Arc<Gateway>>) -> StatusCode {
-    let Some((backend, _lease)) = gateway.pool.rank(None) else {
-        return StatusCode::SERVICE_UNAVAILABLE;
-    };
-    match backend.client.get(backend.url("models", None)).send().await {
-        Ok(response) if response.status().is_success() => StatusCode::OK,
-        _ => StatusCode::SERVICE_UNAVAILABLE,
-    }
+/// Report that the gateway is serving HTTP. [`super::Gateway::serve`] rejects
+/// an empty pool before serving; backend outages do not change this response.
+async fn ready() -> StatusCode {
+    StatusCode::OK
 }
 
 async fn forward(
@@ -54,7 +50,7 @@ async fn forward(
     mut headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some((backend, lease)) = gateway.pool.rank(None) else {
+    let Some(lease) = gateway.select(None) else {
         return backend_unavailable(StatusCode::BAD_GATEWAY);
     };
     let path = uri
@@ -63,9 +59,8 @@ async fn forward(
         .expect("route has /v1/ prefix");
     strip_transport_headers(&mut headers);
 
-    let response = match backend
-        .client
-        .request(method, backend.url(path, uri.query()))
+    let response = match lease
+        .request(method, path, uri.query())
         .headers(headers)
         .body(body)
         .send()

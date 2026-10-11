@@ -1,21 +1,30 @@
 //! Inference backend HTTP client and endpoint resolution.
 
-use std::{error::Error, time::Duration};
+use std::{error::Error, sync::Arc, time::Duration};
 
 use reqwest::{
     Client, Url,
     header::{AUTHORIZATION, HeaderMap, HeaderValue},
 };
 
-use super::tls::install_crypto_provider;
+use super::{CacheIndex, tls::install_crypto_provider, vllm::CacheEvents};
 
-#[derive(Clone, Debug)]
+/// One inference destination and its routing observations. Once admitted to
+/// [`gateway::Pool`](crate::gateway::Pool), its cache and active count are accessed
+/// under the pool's mutex.
+#[derive(Debug)]
 pub(crate) struct Backend {
     pub(crate) client: Client,
     endpoint: Url,
+    pub(crate) cache_events: Option<Arc<CacheEvents>>,
+    pub(crate) cache: Option<CacheIndex>,
+    pub(crate) active_requests: usize,
 }
 
 impl Backend {
+    /// Configure HTTP access to one destination, retaining the API prefix in
+    /// [`reqwest::Url`]. The client applies authentication and the full-response
+    /// deadline; [`Backend::discover_events`] attaches event metadata for serving.
     pub(crate) fn new(
         mut endpoint: Url,
         timeout: Duration,
@@ -40,9 +49,14 @@ impl Backend {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             endpoint,
+            cache_events: None,
+            cache: None,
+            active_requests: 0,
         })
     }
 
+    /// Address an operation beneath the configured API prefix. The caller's
+    /// query replaces the endpoint query on the returned [`reqwest::Url`].
     pub(crate) fn url(&self, path: &str, query: Option<&str>) -> Url {
         let mut url = self.endpoint.clone();
         // Keep the configured API prefix; an absolute join would discard it.

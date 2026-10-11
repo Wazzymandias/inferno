@@ -51,13 +51,19 @@ async fn discovery_refreshes_policy_and_inspection_works_offline() {
     stale["prefix"]["block_size"] = 64.into();
     cache.write(&serde_json::to_vec(&stale).unwrap()).unwrap();
 
-    cache.discover(&backend, "fixture").await.unwrap();
+    cache
+        .discover(
+            backend.client.get(super::config_url(&backend, "fixture")),
+            "fixture",
+        )
+        .await
+        .unwrap();
     assert_eq!(requests.load(Ordering::SeqCst), 1);
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
 
     let processor = crate::inference::InputProcessor::load(
-        cache.for_inspection(&backend, "fixture").await.unwrap(),
+        &cache.for_inspection(&backend, "fixture").await.unwrap(),
     )
     .unwrap();
     let request =
@@ -70,7 +76,13 @@ async fn discovery_refreshes_policy_and_inspection_works_offline() {
             .is_empty()
     );
     // Serving must fail if discovery fails, even when an offline copy exists.
-    let error = cache.discover(&backend, "fixture").await.unwrap_err();
+    let error = cache
+        .discover(
+            backend.client.get(super::config_url(&backend, "fixture")),
+            "fixture",
+        )
+        .await
+        .unwrap_err();
     assert!(error.source().unwrap().is::<reqwest::Error>());
 }
 

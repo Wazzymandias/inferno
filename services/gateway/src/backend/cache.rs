@@ -3,6 +3,8 @@
 use crate::inference::{BlockHash, ModelInput};
 use std::{collections::HashSet, io};
 
+/// The retained history needed to reuse a physical cache group. A bounded
+/// history permits sliding windows and sparse checkpoints at shared boundaries.
 #[derive(Clone, Copy, serde::Deserialize)]
 pub(crate) struct CacheGroup {
     pub(crate) block_size: usize,
@@ -10,6 +12,20 @@ pub(crate) struct CacheGroup {
     pub(crate) required_blocks: Option<std::num::NonZeroUsize>,
 }
 
+/// A change in the cache evidence available for one backend. A completed replay
+/// replaces the index atomically; live batches extend that evidence until it is
+/// withdrawn after a gap, disconnection, or invalid event.
+#[derive(Debug)]
+pub(crate) enum CacheEvent {
+    /// Withdraw cache credit until a completed replay supplies new evidence.
+    Unavailable,
+    /// Replace the backend's evidence with a completed [`backend::CacheIndex`](crate::backend::CacheIndex).
+    Snapshot(CacheIndex),
+    /// Apply one ordered batch atomically with respect to backend selection.
+    Batch(Vec<CacheUpdate>),
+}
+
+/// Changes to GPU-resident blocks within one ordered publisher batch.
 pub(crate) enum CacheUpdate {
     Store {
         group: usize,
@@ -50,6 +66,8 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+/// Observed GPU block residency for one backend. Prefix credit requires every
+/// cache group to satisfy its retained history at the same reusable boundary.
 pub(crate) struct CacheIndex {
     groups: Vec<(CacheGroup, HashSet<BlockHash>)>,
     alignment: usize,
@@ -64,6 +82,8 @@ impl std::fmt::Debug for CacheIndex {
 }
 
 impl CacheIndex {
+    /// Start with no observed blocks and the publisher's cache layout. Reject
+    /// groups that cannot align with the model's hash block size.
     pub(crate) fn new(groups: &[CacheGroup], hash_size: usize) -> io::Result<Self> {
         if hash_size == 0
             || groups.is_empty()
@@ -93,6 +113,8 @@ impl CacheIndex {
         })
     }
 
+    /// Return the longest reusable prefix of [`inference::ModelInput`](crate::inference::ModelInput)
+    /// satisfying all cache groups, including bounded or checkpointed history.
     pub(crate) fn cached_tokens(&self, input: &ModelInput) -> usize {
         let mut runs = vec![0; self.groups.len()];
         let mut cached = 0;
@@ -118,6 +140,8 @@ impl CacheIndex {
         cached
     }
 
+    /// Apply one publisher batch. An error may leave partial changes; callers
+    /// must discard the index before it can contribute routing credit again.
     pub(crate) fn apply(&mut self, events: Vec<CacheUpdate>) -> io::Result<()> {
         for event in events {
             match event {
@@ -155,6 +179,7 @@ impl CacheIndex {
         Ok(())
     }
 
+    /// Withdraw observed blocks while retaining the validated cache layout.
     pub(crate) fn clear(&mut self) {
         for (_, hashes) in &mut self.groups {
             hashes.clear();

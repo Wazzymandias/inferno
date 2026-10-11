@@ -6,18 +6,22 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use zeromq::{PubSocket, RouterSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
+/// A mock inference backend with independently replaceable cache publication.
 struct Replica {
     endpoint: String,
     http: JoinHandle<()>,
     replay: JoinHandle<()>,
     publisher: Option<PubSocket>,
+    model_config: Arc<Mutex<Value>>,
+    cache_events: Arc<Mutex<Value>>,
 }
 
 impl Drop for Replica {
@@ -43,23 +47,28 @@ async fn replica(identity: &'static str, config: Value, cached: bool) -> Replica
         .to_string();
     let mut replay = RouterSocket::new();
     let replay_endpoint = replay.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
-    let discovery = json!({"instance_id":identity, "cache_groups":[{"block_size":8,"required_blocks":null}], "sources":[{
-        "data_parallel_rank":0, "enable_kv_cache_events":true, "publisher":"zmq",
-        "endpoint":endpoint, "replay_endpoint":replay_endpoint, "topic":"cache"
-    }]});
+    let cache_events = Arc::new(Mutex::new(
+        json!({"instance_id":identity, "cache_groups":[{"block_size":8,"required_blocks":null}], "sources":[{
+            "data_parallel_rank":0, "enable_kv_cache_events":true, "publisher":"zmq",
+            "endpoint":endpoint, "replay_endpoint":replay_endpoint, "topic":"cache"
+        }]}),
+    ));
+    let model_config = Arc::new(Mutex::new(config));
+    let published_model = Arc::clone(&model_config);
+    let published_events = Arc::clone(&cache_events);
     let router = Router::new()
         .route(
             "/v1/inferno/model-config",
             get(move || {
-                let config = config.clone();
+                let config = published_model.lock().unwrap().clone();
                 async { Json(config) }
             }),
         )
         .route(
             "/v1/inferno/kv-events",
             get(move || {
-                let discovery = discovery.clone();
-                async { Json(discovery) }
+                let cache_events = published_events.lock().unwrap().clone();
+                async { Json(cache_events) }
             }),
         )
         .route("/v1/responses", post(move || async move { identity }));
@@ -103,6 +112,8 @@ async fn replica(identity: &'static str, config: Value, cached: bool) -> Replica
         http,
         replay,
         publisher: Some(publisher),
+        model_config,
+        cache_events,
     }
 }
 
@@ -127,6 +138,7 @@ fn command(replicas: &[&Replica], cache: &std::path::Path) -> Command {
     command
 }
 
+/// A spawned gateway that is stopped when its test ends.
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {
@@ -142,8 +154,20 @@ async fn line(lines: &mut mpsc::UnboundedReceiver<String>) -> String {
         .expect("gateway exited before readiness")
 }
 
+async fn selected_backend(client: &reqwest::Client, address: &str, request: &Value) -> String {
+    client
+        .post(address)
+        .json(request)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
-async fn discovers_replicas_routes_to_cached_prefix_and_invalidates_on_disconnect() {
+async fn routes_by_recovered_prefixes_and_rejects_incompatible_restarts() {
     let _ = rustls_graviola::default_provider().install_default();
     let first = replica("replica-a", model_config(), false).await;
     let mut second = replica("replica-b", model_config(), true).await;
@@ -151,7 +175,7 @@ async fn discovers_replicas_routes_to_cached_prefix_and_invalidates_on_disconnec
     let mut process = Process(
         command(&[&first, &second], cache.path())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
     );
@@ -183,15 +207,7 @@ async fn discovers_replicas_routes_to_cached_prefix_and_invalidates_on_disconnec
         .unwrap()["request"];
     let client = reqwest::Client::new();
     assert_eq!(
-        client
-            .post(&address)
-            .json(request)
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap(),
+        selected_backend(&client, &address, request).await,
         "replica-b"
     );
     second.publisher.take();
@@ -202,17 +218,48 @@ async fn discovers_replicas_routes_to_cached_prefix_and_invalidates_on_disconnec
         }
     }
     assert_eq!(
-        client
-            .post(&address)
-            .json(request)
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap(),
+        selected_backend(&client, &address, request).await,
         "replica-a"
     );
+    let mut publisher = PubSocket::new();
+    let endpoint = publisher
+        .bind("tcp://127.0.0.1:0")
+        .await
+        .unwrap()
+        .to_string();
+    {
+        let mut cache_events = second.cache_events.lock().unwrap();
+        cache_events["instance_id"] = "replica-b-restarted".into();
+        cache_events["sources"][0]["endpoint"] = endpoint.into();
+    }
+    second.publisher = Some(publisher);
+    loop {
+        let event: Value = serde_json::from_str(&line(&mut lines).await).unwrap();
+        if event["event"] == "kv_events.subscribed" && event["replica"] == 1 {
+            break;
+        }
+    }
+    assert_eq!(
+        selected_backend(&client, &address, request).await,
+        "replica-b"
+    );
+    second.model_config.lock().unwrap()["prefix"]["block_size"] = 16.into();
+    second.publisher.take();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while lines.recv().await.is_some() {}
+    })
+    .await
+    .unwrap();
+    assert!(!process.0.wait().unwrap().success());
+    let mut error = String::new();
+    process
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut error)
+        .unwrap();
+    assert!(error.contains("model configuration changed"));
 }
 
 #[tokio::test]

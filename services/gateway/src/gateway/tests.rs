@@ -13,7 +13,7 @@ use super::{
     Gateway,
     routes::{app, strip_transport_headers},
 };
-use crate::backend::{Backend, Pool};
+use crate::backend::Backend;
 use axum::http::HeaderValue;
 use reqwest::{Client, Url};
 
@@ -129,7 +129,7 @@ async fn preserves_backend_prefix_query_body_and_error_response() {
         ),
     );
     let (upstream, mock_task) = serve(mock).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(
         Url::parse(&format!("{upstream}/engines/v1")).unwrap(),
         Duration::from_secs(5),
@@ -182,7 +182,7 @@ async fn streams_first_event_before_backend_finishes() {
         }),
     );
     let (upstream, mock_task) = serve(mock).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(
         Url::parse(&format!("{upstream}/v1")).unwrap(),
         Duration::from_secs(5),
@@ -241,7 +241,7 @@ async fn times_out_an_unfinished_backend_stream() {
         }),
     );
     let (upstream, mock_task) = serve(mock).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(
         Url::parse(&format!("{upstream}/v1")).unwrap(),
         Duration::from_secs(1),
@@ -271,11 +271,11 @@ async fn times_out_an_unfinished_backend_stream() {
 }
 
 #[tokio::test]
-async fn distinguishes_liveness_backend_failure_and_oversized_request() {
+async fn keeps_health_and_readiness_available_during_backend_failure() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(
         Url::parse(&format!("http://{address}/v1")).unwrap(),
         Duration::from_secs(1),
@@ -290,7 +290,7 @@ async fn distinguishes_liveness_backend_failure_and_oversized_request() {
     let client = Client::new();
     for (path, expected) in [
         ("/healthz", StatusCode::OK),
-        ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
+        ("/readyz", StatusCode::OK),
         ("/v1/models", StatusCode::BAD_GATEWAY),
     ] {
         let response = client.get(format!("{gateway}{path}")).send().await.unwrap();
@@ -348,7 +348,7 @@ async fn shutdown_deadline_bounds_an_active_request() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (upstream, mock_task) = serve(router).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(Url::parse(&upstream).unwrap(), Duration::from_secs(5), None)
         .unwrap();
     let mut gateway = Gateway::new(address.ip(), address.port(), processor()).with_pool(pool);
@@ -372,6 +372,23 @@ async fn shutdown_deadline_bounds_an_active_request() {
 }
 
 #[tokio::test]
+async fn rejects_missing_or_empty_pool_before_binding() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    for pool in [None, Some(super::pool::tests::pool(0))] {
+        let mut gateway = Gateway::new(address.ip(), address.port(), processor());
+        if let Some(pool) = pool {
+            gateway = gateway.with_pool(pool);
+        }
+        let error = gateway
+            .serve(|_| async { panic!("invalid configuration must not start signal handling") })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
 async fn idle_server_shuts_down_cleanly() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -390,7 +407,7 @@ async fn idle_server_shuts_down_cleanly() {
 
 fn processor() -> crate::inference::InputProcessor {
     crate::inference::InputProcessor::load(
-        crate::inference::ModelConfig::parse(
+        &crate::inference::ModelConfig::parse(
             include_bytes!("../testdata/input-string/model-config.json"),
             "fixture",
         )
@@ -417,7 +434,7 @@ async fn streaming_load_lasts_until_completion_cancellation_or_body_error() {
         }))
     }));
     let (upstream, task) = serve(mock).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     for replica in ["zero", "one"] {
         pool.add(
             format!("{upstream}/{replica}/v1").parse().unwrap(),
@@ -436,10 +453,12 @@ async fn streaming_load_lasts_until_completion_cancellation_or_body_error() {
     let input = gateway.processor.prepare(&request()).unwrap();
     let selected = || {
         gateway
-            .select(&input)
+            .select(Some(&input))
             .unwrap()
-            .0
-            .url("responses", None)
+            .request(Method::POST, "responses", None)
+            .build()
+            .unwrap()
+            .url()
             .path()
             .to_owned()
     };
@@ -494,7 +513,7 @@ async fn prepares_locally_and_forwards_once_without_mutating_the_request() {
         }
     }));
     let (upstream, mock_task) = serve(mock).await;
-    let mut pool = Pool::new();
+    let pool = super::pool::tests::pool(0);
     pool.add(
         Url::parse(&format!("{upstream}/v1")).unwrap(),
         Duration::from_secs(5),
@@ -546,6 +565,7 @@ async fn outbound_json_and_http_build_failures_share_a_safe_server_error() {
     use axum::response::IntoResponse;
     use std::error::Error;
 
+    crate::backend::install_crypto_provider();
     let serialization = InputError::from(<serde_json::Error as serde::ser::Error>::custom(
         "private request data",
     ));

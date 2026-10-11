@@ -2,15 +2,11 @@
 
 mod cache;
 mod client;
-mod pool;
 mod tls;
+pub(crate) mod vllm;
 
-pub(crate) use cache::{CacheGroup, CacheIndex, CacheUpdate};
+pub(crate) use cache::{CacheEvent, CacheGroup, CacheIndex, CacheUpdate};
 pub(crate) use client::Backend;
-pub(crate) use pool::{Pool, RequestLease};
-
-#[cfg(test)]
-pub(crate) mod tests;
 
 #[cfg(test)]
 pub(crate) use tls::install_crypto_provider;

@@ -3,12 +3,13 @@
 use std::sync::Arc;
 
 use axum::{
-    http::{HeaderMap, HeaderValue, header},
+    http::{HeaderMap, HeaderValue, Method, header},
     response::Response,
 };
 
 use super::{Gateway, routes::upstream_response};
-use crate::inference::{CreateResponseRequest, InputError, ModelInput};
+use crate::inference;
+use crate::inference::{InputError, ModelInput};
 
 impl Gateway {
     /// Forward a validated request using [`Gateway::select`] for backend choice.
@@ -18,18 +19,17 @@ impl Gateway {
         &self,
         query: Option<&str>,
         mut headers: HeaderMap,
-        request: CreateResponseRequest,
+        request: inference::CreateResponseRequest,
     ) -> Result<Response, InputError> {
         let body = serde_json::to_vec(&request);
         let input = self.prepare_input(request).await?;
-        let (backend, lease) = self.select(&input).ok_or(InputError::NoBackend)?;
+        let lease = self.select(Some(&input)).ok_or(InputError::NoBackend)?;
         headers
             .entry(header::CONTENT_TYPE)
             .or_insert(HeaderValue::from_static("application/json"));
 
-        let response = backend
-            .client
-            .post(backend.url("responses", query))
+        let response = lease
+            .request(Method::POST, "responses", query)
             .headers(headers)
             .body(body?)
             .send()
@@ -37,12 +37,12 @@ impl Gateway {
         Ok(upstream_response(response, lease))
     }
 
-    /// Prepare [`inference::ModelInput`](crate::inference::ModelInput) without
-    /// blocking the async executor. The worker consumes the parsed request and
+    /// Tokenize and hash [`inference::ModelInput`] on a blocking worker.
+    /// The worker consumes the parsed request and
     /// can finish after its awaiting handler is cancelled.
     async fn prepare_input(
         &self,
-        request: CreateResponseRequest,
+        request: inference::CreateResponseRequest,
     ) -> Result<ModelInput, InputError> {
         let processor = Arc::clone(&self.processor);
         tokio::task::spawn_blocking(move || processor.prepare(&request)).await?

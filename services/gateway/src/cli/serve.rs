@@ -12,7 +12,10 @@ use reqwest::Url;
 use tokio_util::sync::CancellationToken;
 
 use super::{inference_api_key, inference_endpoints, inference_model, inference_timeout};
-use crate::{backend::Pool, gateway::Gateway, inference::InputProcessor};
+use crate::{
+    gateway::{Gateway, Pool},
+    inference::InputProcessor,
+};
 
 /// Inferno: an OpenAI-compatible inference gateway. Flags override environment variables.
 #[derive(Clone, Debug, Bpaf)]
@@ -65,15 +68,15 @@ pub(crate) struct ServeCommand {
 
 impl ServeCommand {
     pub(crate) async fn execute(self) -> Result<(), Box<dyn Error>> {
-        let (pool, config) = Pool::connect(
+        let pool = Pool::connect(
             self.endpoints,
-            &self.model,
+            self.model,
             Duration::from_secs(self.timeout.get()),
             self.api_key,
             self.load_penalty.get(),
         )
         .await?;
-        let processor = InputProcessor::load(config)?;
+        let processor = InputProcessor::load(&pool.model_config)?;
         Gateway::new(self.address, self.port, processor)
             .with_pool(pool)
             .with_limits(
