@@ -281,7 +281,7 @@ export endpoints, and shutdown instructions.
 | Task | Command or endpoint |
 | --- | --- |
 | Check API process | `/healthz` |
-| Check backend reachability | `/readyz` |
+| Check gateway readiness | `/readyz` |
 | Check web process | `docker compose ps web` |
 | Web logs | `docker compose logs web` |
 | Gateway logs | `docker compose logs gateway` |
